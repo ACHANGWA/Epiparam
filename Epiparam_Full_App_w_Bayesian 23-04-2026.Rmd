@@ -16,15 +16,14 @@ output:
       sidebar-bg: '#8B5A00'
       smart: no
 runtime: shiny
-resource_files:
-- gamma_model.rds
-- lognormal_model.rds
-- normal_model.rds
-- weibull_model.rds
 ---
 
 ```{=html}
 <style type="text/css">
+
+:root {
+--epiparam-font: Jost, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
 
 .vis-network .vis-export {
 position: absolute !important;
@@ -119,7 +118,7 @@ border-top-color: #8B5A00;
 .navbar.navbar-inverse ul.nav.navbar-nav>li {
 color: #fff;
 font-size: 16px;
-font-family: "TT Norms Pro";
+font-family: var(--epiparam-font);
 }
 
 .nav-tabs-custom > .nav-tabs {
@@ -128,7 +127,7 @@ border-bottom: 1px solid #8B5A00;
 color: white;
 border-top-right-radius: 10px;
 border-top-left-radius: 3px;
-font-family: "Tw Cen MT";
+font-family: var(--epiparam-font);
 }
 
 .nav-tabs-custom > .nav-tabs > li > a, .nav-tabs-custom > .nav-tabs > li > a:active {
@@ -150,7 +149,8 @@ margin-right: 8px;
 }
 
 .navbar-brand {
-font-family: "TT Norms Pro Black";
+font-family: var(--epiparam-font);
+font-weight: 700;
 font-size: 38px;
 padding: 0px;
 }
@@ -164,7 +164,7 @@ padding: 7px 10px 4px;
 }
 
 .section.sidebar {
-font-family: "TT Norms Pro";
+font-family: var(--epiparam-font);
 font-size: 14px;
 background-color: #8B5A00 !important;
 color: white;
@@ -183,10 +183,45 @@ visibility: hidden;
 overflow: auto;
 }
 
+/* dataset preview tabs hold the data check message and the table under it.
+flexdashboard stretches every output to the full height of the tab, which
+pushed the table out of sight; here each keeps its own height and the tab
+scrolls instead */
+.data-preview .chart-shim {
+overflow-y: auto;
+}
+
+.data-preview .chart-stage .shiny-bound-output {
+height: auto !important;
+}
+
+/* one line per row; wide files scroll sideways */
+.data-preview table.dataTable th,
+.data-preview table.dataTable td {
+white-space: nowrap;
+}
+
+/* the logo sits below the last control of the sidebar, at the bottom of the
+window when there is room for it, so it never covers a control */
+.section.sidebar > form {
+display: flow-root;
+position: relative;
+min-height: 100%;
+padding-bottom: 80px;
+}
+
+.section.sidebar .shiny-image-output {
+position: absolute;
+left: 0;
+bottom: 10px;
+width: auto !important;
+height: auto !important;
+}
+
 a {
 color: #28282b;
 font-size: 19px;
-font-family: TT Norms Pro;
+font-family: var(--epiparam-font);
 background-color: transparent;
 }
 
@@ -201,7 +236,7 @@ width: 100% !important;
 }
 
 pre {
-font-family: "TT Norms Pro";
+font-family: var(--epiparam-font);
 font-size: medium;
 }
 
@@ -248,11 +283,76 @@ library(loo)
 options(warn = -1) 
 rstan_options(auto_write = TRUE)
 
+# the mcmc sampler starts from this seed, so the same data and settings give the
+# same estimates on every run. change it to check that a result does not depend
+# on the seed.
+STAN_SEED <- 20260423
+
 # date parsing function
 parse_date <- function(x) {
   x <- trimws(as.character(x))
   parsed <- lubridate::parse_date_time(x, orders = c("dmy", "ymd", "mdy"), quiet = TRUE)
   as.Date(parsed)
+}
+
+# --- input checks ----------------------------------------------------------
+# rows the app cannot use were previously dropped without a word, so a typo in a
+# date or a transmission link that points at no one looked exactly like clean
+# data. every page now marks each row with what became of it, shows the panel
+# below above its preview, and previews the parsed values rather than the raw
+# text of the file.
+
+# values that were supplied but could not be read as a date
+unreadable_values <- function(raw, parsed) {
+  raw <- trimws(as.character(raw))
+  blank <- !nzchar(raw) | is.na(raw) | toupper(raw) %in% c("NA", "N/A", "NULL", "-")
+  unique(raw[!blank & is.na(parsed)])
+}
+
+# turns a status column into one readable line per problem, with examples
+problems_from_status <- function(status, examples = list()) {
+  bad <- status[status != "used"]
+  if (!length(bad)) return(list())
+  tab <- sort(table(bad), decreasing = TRUE)
+  lapply(names(tab), function(k) {
+    n <- as.integer(tab[[k]])
+    txt <- sprintf("%d row%s: %s", n, if (n == 1) "" else "s", sub("^excluded: ", "", k))
+    ex <- examples[[k]]
+    if (!is.null(ex) && length(ex)) {
+      txt <- paste0(txt, " (for example: ",
+                    paste0("\u201c", utils::head(ex, 3), "\u201d", collapse = ", "), ")")
+    }
+    txt
+  })
+}
+
+# the panel shown above each dataset preview
+data_check_panel <- function(n_read, n_used, problems = list(),
+                             used_label = "used in the analysis",
+                             out_label  = "left out") {
+  n_out <- n_read - n_used
+  good  <- n_out == 0 && !length(problems)
+  htmltools::div(
+    style = paste0(
+      "border-left:4px solid ", if (good) "#2E7D32" else "#B26A00", ";",
+      "background:", if (good) "#EDF7ED" else "#FFF4E5", ";",
+      "padding:10px 14px;margin:6px 0 12px 0;border-radius:4px;",
+      "font-size:14px;line-height:1.5;color:#222222;"
+    ),
+    htmltools::tags$b(sprintf(
+      "%d row%s in the current selection, %d %s, %d %s.",
+      n_read, if (n_read == 1) "" else "s", n_used, used_label, n_out, out_label)),
+    if (length(problems)) {
+      htmltools::tags$ul(style = "margin:6px 0 0 0;padding-left:18px;",
+                         lapply(problems, htmltools::tags$li))
+    } else {
+      htmltools::div(style = "margin-top:2px;", "Every row could be read.")
+    },
+    htmltools::div(
+      style = "margin-top:6px;font-size:13px;color:#555555;",
+      "The table below shows the values as the app read them. The status column says what happened to each row."
+    )
+  )
 }
 
 # helper functions for model fitting (MLE pages)
@@ -312,6 +412,15 @@ fit_parametric_model <- function(data, dist, shift_val = 0) {
     )
   }
   
+  # a skewed distribution fitted to data moved to the right is a shifted
+  # distribution: report the shift next to its parameters, and put the moments
+  # back on to the observed scale
+  if (shift_val != 0) {
+    raw_params <- rbind(raw_params,
+                        data.frame(parameter = "shift.applied",
+                                   value = round(shift_val, 2)))
+  }
+
   final_mean <- as.numeric(mean_val) - shift_val
   final_var <- as.numeric(var_val)
   final_ci <- as.numeric(ci_95) - shift_val
@@ -319,6 +428,7 @@ fit_parametric_model <- function(data, dist, shift_val = 0) {
   list(
     model = toupper(dist),
     fit_obj = fit,
+    shift = shift_val,
     raw_params_df = raw_params,
     moments = c(mean=final_mean, var=final_var, ci95=final_ci),
     aic = AIC(fit),
@@ -363,7 +473,10 @@ get_plot_data_si <- function(data, fit_res) {
   hist_data <- hist(data, plot = FALSE, breaks = h_breaks)
   hist_df <- data.frame(from = hist_data$breaks[-length(hist_data$breaks)], to = hist_data$breaks[-1], y = hist_data$density, x = hist_data$mids)
   
-  shift_val <- if(tolower(fit_res$model) == "normal") 0 else 1
+  # the shift the model was actually fitted with, so the curve lines up with
+  # the histogram of the observed values
+  shift_val <- if (!is.null(fit_res$shift)) fit_res$shift else
+                 if (tolower(fit_res$model) == "normal") 0 else 1
   est <- fit_res$fit_obj$estimate
   d_name <- tolower(fit_res$model)
   x_vals <- seq(min(data) - 5, max(data) + 5, length.out = 500)
@@ -386,66 +499,515 @@ get_plot_data_si <- function(data, fit_res) {
   list(hist = hist_df, curve = curve_data)
 }
 
-# bayesian helper: get stan code (not actually used but for reference)
+# ---------------------------------------------------------------------------
+# bayesian models: stan source and compilation
+#
+# the stan code below is the only definition of the four bayesian models. a
+# compiled stan model is a shared library that loads only on the platform, R
+# version and rstan version that built it, so a binary built elsewhere fails
+# with "the compiled object from C++ code for this model is invalid".
+#
+# a model is taken from, in this order:
+#   1. this R session, once it has been loaded
+#   2. the per-user cache (see stan_cache_dir), filled by an earlier compilation
+#      on this computer
+#   3. the stan_models folder of the app, filled by precompile_models.R --bundle
+#      on a computer with the same platform, R version and rstan version
+#   4. a compilation on this computer, in a separate R process. that process
+#      starts when the app opens and works through the models one at a time,
+#      the one the user is waiting for first, so the first run seldom waits for
+#      the whole compilation and the app shows how long it has been going.
+#
+# a binary is used only when it was built for this platform and from the source
+# in get_stan_code(), so the code shown here and the code that produced the
+# results can never drift apart. compiling takes one to three minutes and about
+# 3.5 GB of memory per model, which is why only one model is compiled at a time.
+# ---------------------------------------------------------------------------
+
+# --- stan helpers: start ------------------------------------------------
+# precompile_models.R and the background compilation both read the block
+# between these two markers, so the models stay defined in exactly one place.
+# please keep them in place.
+
+STAN_MODELS <- c("Lognormal", "Weibull", "Gamma", "Normal")
+
+# bayesian helper: the stan source each model is built from
 get_stan_code <- function(model_name = "Weibull") {
+
   if (model_name == "Weibull") {
     return("
-      data { int<lower=0> N; vector[N] tStartExposure; vector[N] tEndExposure; vector[N] tSymptomOnset; }
-      parameters { real<lower=0> alphaInc; real<lower=0> sigmaInc; vector<lower=0, upper=1>[N] uE; }
-      transformed parameters { vector[N] tE; tE = tStartExposure + uE .* (tEndExposure - tStartExposure); }
-      model { alphaInc ~ normal(0, 10); sigmaInc ~ normal(0, 10); target += weibull_lpdf(tSymptomOnset - tE | alphaInc, sigmaInc); }
-    ")
-  } 
+data {
+  int<lower=0> N;
+  vector[N] tStartExposure;
+  vector[N] tEndExposure;
+  vector[N] tSymptomOnset;
+}
+parameters {
+  real<lower=0> alphaInc; // shape
+  real<lower=0> sigmaInc; // scale
+  vector<lower=0, upper=1>[N] uE;
+}
+transformed parameters {
+  vector[N] tE;
+  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
+}
+model {
+  // priors
+  alphaInc ~ lognormal(log(2.0), 1.0);
+  sigmaInc ~ lognormal(log(3.0), 1.0);
+
+  // likelihood
+  target += weibull_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+}
+")
+  }
   else if (model_name == "Gamma") {
     return("
-      data { int<lower=0> N; vector[N] tStartExposure; vector[N] tEndExposure; vector[N] tSymptomOnset; }
-      parameters { real<lower=0> alphaInc; real<lower=0> sigmaInc; vector<lower=0, upper=1>[N] uE; }
-      transformed parameters { vector[N] tE; tE = tStartExposure + uE .* (tEndExposure - tStartExposure); }
-      model { alphaInc ~ normal(0, 10); sigmaInc ~ normal(0, 10); target += gamma_lpdf(tSymptomOnset - tE | alphaInc, sigmaInc); }
-    ")
+data {
+  int<lower=0> N;
+  vector[N] tStartExposure;
+  vector[N] tEndExposure;
+  vector[N] tSymptomOnset;
+}
+parameters {
+  real<lower=0> alphaInc; // shape
+  real<lower=0> sigmaInc; // rate
+  vector<lower=0, upper=1>[N] uE;
+}
+transformed parameters {
+  vector[N] tE;
+  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
+}
+model {
+  // priors
+  alphaInc ~ lognormal(log(2.0), 1.0);
+  sigmaInc ~ lognormal(log(0.66), 1.0);
+
+  // likelihood
+  target += gamma_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+}
+")
   }
   else if (model_name == "Lognormal") {
     return("
-      data { int<lower=0> N; vector[N] tStartExposure; vector[N] tEndExposure; vector[N] tSymptomOnset; }
-      parameters { real alphaInc; real<lower=0> sigmaInc; vector<lower=0, upper=1>[N] uE; }
-      transformed parameters { vector[N] tE; tE = tStartExposure + uE .* (tEndExposure - tStartExposure); }
-      model { alphaInc ~ normal(0, 10); sigmaInc ~ normal(0, 10); target += lognormal_lpdf(tSymptomOnset - tE | alphaInc, sigmaInc); }
-    ")
+data {
+  int<lower=0> N;
+  vector[N] tStartExposure;
+  vector[N] tEndExposure;
+  vector[N] tSymptomOnset;
+}
+parameters {
+  real alphaInc;          // meanlog
+  real<lower=0> sigmaInc; // sdlog
+  vector<lower=0, upper=1>[N] uE;
+}
+transformed parameters {
+  vector[N] tE;
+  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
+}
+model {
+  // priors
+  alphaInc ~ normal(log(3.0), 1.0);
+  sigmaInc ~ normal(0, 1.0);
+
+  // likelihood
+  target += lognormal_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+}
+")
   }
   else if (model_name == "Normal") {
     return("
-      data { int<lower=0> N; vector[N] tStartExposure; vector[N] tEndExposure; vector[N] tSymptomOnset; }
-      parameters { real alphaInc; real<lower=0> sigmaInc; vector<lower=0, upper=1>[N] uE; }
-      transformed parameters { vector[N] tE; tE = tStartExposure + uE .* (tEndExposure - tStartExposure); }
-      model { alphaInc ~ normal(0, 10); sigmaInc ~ normal(0, 10); target += normal_lpdf(tSymptomOnset - tE | alphaInc, sigmaInc); }
-    ")
+data {
+  int<lower=0> N;
+  vector[N] tStartExposure;
+  vector[N] tEndExposure;
+  vector[N] tSymptomOnset;
+}
+parameters {
+  real alphaInc;          // mean
+  real<lower=0> sigmaInc; // sd
+  vector<lower=0, upper=1>[N] uE;
+}
+transformed parameters {
+  vector[N] tE;
+  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
+}
+model {
+  // priors
+  alphaInc ~ normal(3.0, 1.0);
+  sigmaInc ~ normal(0, 1.0);
+
+  // likelihood
+  target += normal_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+}
+")
   }
   return(NULL)
 }
 
-# load stan models
-get_compiled_stan_model <- function(model_name = "Weibull") {
-  
-  # object name for in-memory caching
-  obj_name <- paste0("stan_model_", model_name)
-  file_name <- paste0(tolower(model_name), "_model.rds")
-  
-  # check memory (RAM)
-  if (exists(obj_name, envir = .GlobalEnv)) {
-    return(get(obj_name, envir = .GlobalEnv))
+# where the models compiled on this computer are kept. set EPIPARAM_STAN_CACHE
+# to place them somewhere else, for example on a shared server installation.
+stan_cache_dir <- function() {
+  d <- Sys.getenv("EPIPARAM_STAN_CACHE", "")
+  if (!nzchar(d)) {
+    d <- tryCatch(tools::R_user_dir("EpiParam", "cache"),
+                  error = function(e) file.path(tempdir(), "EpiParam-stan"))
   }
-  
-  # check disk (load the Linux/windows binary)
-  if (file.exists(file_name)) {
-    # this reads the binary we made in WSL/Windows
-    mod <- readRDS(file_name) 
-    assign(obj_name, mod, envir = .GlobalEnv)
-    return(mod)
-  }
-  
-  stop(paste("Model file", file_name, "not found. Ensure .rds files are uploaded."))
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  d
 }
 
+# the file name carries the platform, the rstan version and the R version, so a
+# binary is never handed to an installation that cannot load it. R keeps
+# compiled code compatible within a minor version (4.4.0 to 4.4.3, say), so the
+# R version is given as major.minor.
+stan_model_file_name <- function(model_name) {
+  r_minor <- strsplit(R.version$minor, ".", fixed = TRUE)[[1]][1]
+  sprintf("%s-%s-rstan%s-R%s.%s.rds", tolower(model_name), R.version$platform,
+          utils::packageVersion("rstan"), R.version$major, r_minor)
+}
+
+stan_cache_file <- function(model_name) {
+  file.path(stan_cache_dir(), stan_model_file_name(model_name))
+}
+
+# models built in advance with precompile_models.R --bundle and shipped in the
+# stan_models folder next to the app
+stan_bundle_file <- function(model_name) {
+  file.path("stan_models", stan_model_file_name(model_name))
+}
+
+# stan source reduced to what matters for a comparison: rstan normalises the
+# code it stores (it drops blank lines), so the two are compared without blank
+# lines or trailing spaces rather than character by character
+stan_code_key <- function(x) {
+  x <- gsub("\r\n", "\n", as.character(x), fixed = TRUE)
+  lines <- trimws(strsplit(x, "\n", fixed = TRUE)[[1]])
+  paste(lines[nzchar(lines)], collapse = "\n")
+}
+
+# a compiled object is safe to use only if it was built for this platform and
+# from the source the app is asking for
+stan_model_usable <- function(mod, code) {
+  if (!inherits(mod, "stanmodel")) return(FALSE)
+  if (!identical(stan_code_key(mod@model_code), stan_code_key(code))) return(FALSE)
+  built_on <- tryCatch(mod@dso@system, error = function(e) NA_character_)
+  if (!identical(built_on, paste(R.version$arch, R.version$os, sep = ", "))) return(FALSE)
+  # rstan's own check as well, where it is available: it also catches a dso
+  # that is no longer loaded
+  isTRUE(tryCatch(rstan:::is_sm_valid(mod), error = function(e) TRUE))
+}
+
+# the model saved in a file, or NULL when there is none this installation can
+# use. a cached file that cannot be used (older source, another installation)
+# is removed so that it gets rebuilt.
+stan_read_model <- function(path, code, remove_stale = FALSE) {
+  if (!file.exists(path)) return(NULL)
+  mod <- tryCatch(readRDS(path), error = function(e) NULL)
+  if (stan_model_usable(mod, code)) return(mod)
+  if (remove_stale) unlink(path)
+  NULL
+}
+
+# a model being compiled is marked by a folder next to its cache file. creating
+# a folder either succeeds or fails as a whole, so two R processes never both
+# start compiling the same model.
+stan_lock_dir <- function(model_name) paste0(stan_cache_file(model_name), ".lock")
+
+# the compiler's message from a failed attempt, kept for the app to show
+stan_error_file <- function(model_name) paste0(stan_cache_file(model_name), ".error")
+
+# is an R process on this computer compiling the model right now? a lock left
+# behind by a process that stopped part way is removed.
+stan_lock_busy <- function(model_name) {
+  lock <- stan_lock_dir(model_name)
+  if (!dir.exists(lock)) return(FALSE)
+  age <- as.numeric(difftime(Sys.time(), file.mtime(lock), units = "secs"))
+  pid <- tryCatch(as.integer(readLines(file.path(lock, "pid"), warn = FALSE)[1]),
+                  error = function(e) NA_integer_, warning = function(w) NA_integer_)
+  busy <- if (is.na(pid)) {
+    age < 30                                   # just created, pid not written yet
+  } else if (requireNamespace("ps", quietly = TRUE)) {
+    age < 1800 && isTRUE(tryCatch(ps::ps_is_running(ps::ps_handle(pid)),
+                                  error = function(e) FALSE))
+  } else {
+    age < 900
+  }
+  if (!busy) unlink(lock, recursive = TRUE)
+  busy
+}
+
+stan_lock_take <- function(model_name) {
+  if (stan_lock_busy(model_name)) return(FALSE)
+  lock <- stan_lock_dir(model_name)
+  if (!dir.create(lock, showWarnings = FALSE)) {
+    # either another process got there first, or the cache folder cannot be
+    # written to, in which case compile anyway
+    return(!dir.exists(lock))
+  }
+  writeLines(as.character(Sys.getpid()), file.path(lock, "pid"))
+  TRUE
+}
+
+# compile a model into the cache, unless a usable copy exists already or
+# another process is compiling it. run by the background process and by
+# precompile_models.R. returns TRUE when a usable model is in place.
+stan_build <- function(model_name) {
+  code  <- get_stan_code(model_name)
+  cache <- stan_cache_file(model_name)
+  if (!is.null(stan_read_model(cache, code, remove_stale = TRUE)) ||
+      !is.null(stan_read_model(stan_bundle_file(model_name), code))) {
+    return(invisible(TRUE))
+  }
+  if (!stan_lock_take(model_name)) return(invisible(FALSE))
+  on.exit(unlink(stan_lock_dir(model_name), recursive = TRUE), add = TRUE)
+  unlink(stan_error_file(model_name))
+  message("compiling the ", tolower(model_name), " model for this computer")
+  mod <- tryCatch(
+    rstan::stan_model(model_code = code,
+                      model_name = paste0("epiparam_", tolower(model_name))),
+    error = function(e) {
+      # rstan's own message says little; the end of the compiler output, which
+      # the background process writes to a log, says what went wrong
+      log <- Sys.getenv("EPIPARAM_STAN_LOG")
+      out <- if (nzchar(log) && file.exists(log)) tail(readLines(log, warn = FALSE), 15)
+      try(writeLines(c(conditionMessage(e), out), stan_error_file(model_name)), silent = TRUE)
+      NULL
+    }
+  )
+  if (is.null(mod)) return(invisible(FALSE))
+  # saved under a temporary name first, so no one ever reads a half-written file
+  part <- paste0(cache, ".part", Sys.getpid())
+  saved <- !inherits(try(saveRDS(mod, part), silent = TRUE), "try-error") &&
+    file.rename(part, cache)
+  unlink(part)
+  invisible(saved)
+}
+
+# the text of this block, so that a separate R process can define the same
+# functions. taken from the chunk while the app is being knitted, otherwise
+# from the application file in the working folder.
+stan_helpers_text <- function() {
+  src <- tryCatch(unlist(knitr::knit_code$get("setup-chunk")), error = function(e) NULL)
+  if (!any(grepl("^# --- stan helpers: end", src))) {
+    for (f in list.files(".", pattern = "[.]Rmd$")) {
+      s <- readLines(f, warn = FALSE, encoding = "UTF-8")
+      if (any(grepl("^# --- stan helpers: end", s))) { src <- s; break }
+    }
+  }
+  i0 <- grep("^# --- stan helpers: start", src)
+  i1 <- grep("^# --- stan helpers: end", src)
+  if (length(i0) != 1 || length(i1) != 1 || i1 <= i0) return(NULL)
+  paste(src[(i0 + 1):(i1 - 1)], collapse = "\n")
+}
+
+# the background process of this R session, if one has been started
+stan_job <- function() get0(".epiparam_stan_job", envir = .GlobalEnv, inherits = FALSE)
+
+# while the background process works through its list, the model a user is
+# waiting for is written here and compiled next
+stan_next_file <- function() {
+  file.path(stan_cache_dir(), sprintf("next-%s.txt", Sys.getpid()))
+}
+
+# start a separate R process that compiles the models, one at a time. returns
+# FALSE when that is not possible (callr missing, or the cache folder cannot be
+# written to).
+stan_start_build <- function(models) {
+  if (!requireNamespace("callr", quietly = TRUE)) return(FALSE)
+  if (file.access(stan_cache_dir(), 2) != 0) return(FALSE)
+  helpers <- if (exists("STAN_HELPERS_TEXT") && !is.null(STAN_HELPERS_TEXT)) {
+    STAN_HELPERS_TEXT
+  } else {
+    stan_helpers_text()
+  }
+  if (is.null(helpers)) return(FALSE)
+  log <- tempfile("compile-", tmpdir = stan_cache_dir(), fileext = ".log")
+  job <- tryCatch(
+    callr::r_bg(
+      function(helpers, models, cache, next_file, log) {
+        Sys.setenv(EPIPARAM_STAN_CACHE = cache, EPIPARAM_STAN_LOG = log)
+        eval(parse(text = helpers), envir = globalenv())
+        on.exit(unlink(c(next_file, log)), add = TRUE)
+        todo <- models
+        while (length(todo)) {
+          wanted <- tryCatch(readLines(next_file, warn = FALSE)[1],
+                             error = function(e) NA, warning = function(w) NA)
+          m <- if (!is.na(wanted) && wanted %in% todo) wanted else todo[1]
+          todo <- setdiff(todo, m)
+          stan_build(m)
+        }
+      },
+      args = list(helpers = helpers, models = models, cache = stan_cache_dir(),
+                  next_file = stan_next_file(), log = log),
+      # stopped, with the compiler it started, when the app stops
+      stdout = log, stderr = "2>&1", supervise = TRUE, cleanup_tree = TRUE
+    ),
+    error = function(e) NULL
+  )
+  if (is.null(job)) return(FALSE)
+  assign(".epiparam_stan_job", job, envir = .GlobalEnv)
+  TRUE
+}
+
+# when the app opens: start compiling, in the background, the models this
+# computer does not have yet, the default model of each bayesian page first.
+# set EPIPARAM_STAN_PREPARE=false to switch this off.
+stan_prepare_models <- function(models = c("Lognormal", "Normal", "Weibull", "Gamma")) {
+  if (identical(tolower(Sys.getenv("EPIPARAM_STAN_PREPARE")), "false")) return(invisible(FALSE))
+  job <- stan_job()
+  if (!is.null(job) && job$is_alive()) return(invisible(TRUE))
+  have <- file.exists(vapply(models, stan_cache_file, "")) |
+    file.exists(vapply(models, stan_bundle_file, ""))
+  if (all(have)) return(invisible(FALSE))
+  invisible(stan_start_build(models))
+}
+
+# progress note, shown in the app while it is running and on the console otherwise
+stan_note <- function(msg, console = TRUE) {
+  if (requireNamespace("shiny", quietly = TRUE) &&
+      !is.null(shiny::getDefaultReactiveDomain())) {
+    try(shiny::setProgress(detail = msg), silent = TRUE)
+  } else if (console) {
+    message(msg)
+  }
+}
+
+stan_elapsed <- function(secs) {
+  secs <- max(0, round(as.numeric(secs)))
+  if (secs < 60) paste(secs, "s") else sprintf("%d min %02d s", secs %/% 60, secs %% 60)
+}
+
+# wait until the model is compiled, starting the compilation if no one has, and
+# keep the user informed meanwhile. returns FALSE when no separate process could
+# be used, so the caller compiles in this R session instead.
+stan_wait_for_model <- function(model_name) {
+  cache   <- stan_cache_file(model_name)
+  started <- Sys.time()
+  own     <- FALSE
+  tick    <- 0
+  repeat {
+    busy <- stan_lock_busy(model_name)
+    if (!busy && file.exists(cache)) return(TRUE)
+    # a compilation never takes this long: stop waiting and compile here
+    if (difftime(Sys.time(), started, units = "mins") > 20) return(FALSE)
+    on_console <- tick %% 15 == 0
+    tick <- tick + 1
+    job <- stan_job()
+    job_alive <- !is.null(job) && job$is_alive()
+    if (busy) {
+      since <- tryCatch(file.mtime(stan_lock_dir(model_name)), error = function(e) started)
+      stan_note(paste0("compiling the ", tolower(model_name), " model for this computer ",
+                       "(first run only, usually one to three minutes): ",
+                       stan_elapsed(difftime(Sys.time(), since, units = "secs"))), on_console)
+    } else if (job_alive) {
+      # the background process is busy with another model: this one is next
+      try(writeLines(model_name, stan_next_file()), silent = TRUE)
+      other <- Filter(stan_lock_busy, setdiff(STAN_MODELS, model_name))
+      stan_note(paste0(if (length(other)) paste0("finishing the ", tolower(other[1]), " model; ") else "",
+                       "the ", tolower(model_name), " model is compiled next (first run only): ",
+                       stan_elapsed(difftime(Sys.time(), started, units = "secs"))), on_console)
+    } else if (own) {
+      return(TRUE)    # the compilation ended without a model; the caller reports why
+    } else {
+      if (!stan_start_build(model_name)) return(FALSE)
+      own <- TRUE
+    }
+    Sys.sleep(1)
+  }
+}
+
+# what to tell the user when the machine has no working C++ toolchain
+stan_build_help <- function(model_name, err) {
+  paste0(
+    "The ", model_name, " model could not be compiled on this computer.\n\n",
+    "EpiParam builds the Bayesian models the first time they are used, and that needs\n",
+    "a working C++ toolchain:\n",
+    "  Windows   install Rtools from https://cran.r-project.org/bin/windows/Rtools/\n",
+    "  macOS     run  xcode-select --install  in the Terminal\n",
+    "  Linux     install the build tools, for example  sudo apt install build-essential\n\n",
+    "Restart R once it is installed, then run the model again.\n\n",
+    "The compiler reported:\n", err
+  )
+}
+
+# the compiled model, from wherever it is available (see the notes above)
+get_compiled_stan_model <- function(model_name = "Weibull") {
+
+  code <- get_stan_code(model_name)
+  if (is.null(code)) stop("unknown bayesian model: ", model_name, call. = FALSE)
+
+  obj_name <- paste0("stan_model_", model_name)
+  keep <- function(mod) {
+    assign(obj_name, mod, envir = .GlobalEnv)
+    mod
+  }
+
+  # already loaded in this session
+  if (exists(obj_name, envir = .GlobalEnv)) {
+    mod <- get(obj_name, envir = .GlobalEnv)
+    if (stan_model_usable(mod, code)) return(mod)
+  }
+
+  # compiled on this computer before, or shipped with the app for this installation
+  mod <- stan_read_model(stan_cache_file(model_name), code, remove_stale = TRUE)
+  if (is.null(mod)) mod <- stan_read_model(stan_bundle_file(model_name), code)
+  if (!is.null(mod)) return(keep(mod))
+
+  # otherwise it is compiled here, in a separate R process where possible
+  if (stan_wait_for_model(model_name)) {
+    mod <- stan_read_model(stan_cache_file(model_name), code)
+    if (!is.null(mod)) return(keep(mod))
+    err <- tryCatch(paste(readLines(stan_error_file(model_name), warn = FALSE), collapse = "\n"),
+                    error = function(e) NULL, warning = function(w) NULL)
+    if (!is.null(err)) stop(stan_build_help(model_name, err), call. = FALSE)
+  }
+
+  # and in this R session when that is not possible
+  stan_note(paste0("compiling the ", tolower(model_name),
+                   " model for this computer (first run only, usually one to three minutes)"))
+  mod <- tryCatch(
+    rstan::stan_model(model_code = code,
+                      model_name = paste0("epiparam_", tolower(model_name))),
+    error = function(e) stop(stan_build_help(model_name, conditionMessage(e)), call. = FALSE)
+  )
+  try(saveRDS(mod, stan_cache_file(model_name)), silent = TRUE)
+  keep(mod)
+}
+
+# --- stan helpers: end --------------------------------------------------
+
+# the block above as text, for the separate R process that compiles the models
+STAN_HELPERS_TEXT <- stan_helpers_text()
+
+```
+
+```{r stan-prepare}
+# start compiling, in the background, any bayesian model this computer does not
+# have yet, so that it is usually ready by the time someone presses run. it
+# starts once the page has reached the browser: the page itself is knitted in a
+# temporary folder, and the stan_models folder is looked for in the app folder.
+# (invisible: onFlushed returns a function, which would otherwise be printed on the page)
+if (!is.null(shiny::getDefaultReactiveDomain())) {
+  invisible(shiny::onFlushed(stan_prepare_models, once = TRUE))
+}
+```
+
+```{r font-face}
+# the typeface of the app, jost (sil open font license, see fonts/OFL.txt), is
+# embedded in the page, so the app looks the same on windows, macos and linux,
+# with or without an internet connection. to use another typeface, change
+# --epiparam-font in the style sheet at the top of this file.
+local({
+  font_file <- "fonts/Jost-VariableFont_wght.woff2"
+  if (file.exists(font_file)) {
+    htmltools::tags$style(paste0(
+      "@font-face { font-family: 'Jost'; font-style: normal; font-weight: 100 900; ",
+      "font-display: swap; src: url(data:font/woff2;base64,",
+      base64enc::base64encode(font_file), ") format('woff2'); }"
+    ))
+  }
+})
 ```
 
 ```{r global-downloads, context="server"}
@@ -534,7 +1096,7 @@ conditionalPanel(
 hr()
 valueBox(
   value = tags$h6("Note: The Incubation Period is estimated using Maximum Likelihood Estimation (MLE).",
-                  style = "text-align: justify; font-family: Tw Cen MT; font-size: 20px; color: white;"),
+                  style = "text-align: justify; font-family: var(--epiparam-font); font-size: 20px; color: white;"),
   color = "#FFFFFF")
 
 hr()
@@ -556,8 +1118,8 @@ renderImage({
     contentType = 'image/png',
     width = 210,
     height = 60,
-    style = "position: fixed; bottom: 10px; left: 10px; cursor: pointer;",
-    onclick = "window.location.href = '[http://onehealth.or.kr/](http://onehealth.or.kr/)';"
+    style = "display: block; cursor: pointer;",
+    onclick = "window.location.href = 'http://onehealth.or.kr/';"
   )
 }, deleteFile = F)
 
@@ -612,23 +1174,29 @@ dataset_inc <- eventReactive(list(input$file1_inc, input$sex_inc, input$age_grou
   dataset
 })
 
-get_incu_data <- function() {
+# every row of the selection, with the dates as the app read them and a note of
+# what became of it. the preview, the check panel and the model all read this,
+# so what the user is shown is what the model was given.
+inc_checked <- reactive({
   req(dataset_inc())
-  
-  data <- dataset_inc() %>%
-    mutate(
-      date_of_exposure = parse_date(date_of_exposure),
-      date_of_onset  = parse_date(date_of_onset)
-    ) %>%
-    filter(
-      !is.na(date_of_exposure),
-      !is.na(date_of_onset)
-    ) %>%
-    mutate(incuPeriods = as.numeric(date_of_onset - date_of_exposure)) %>%
-    filter(incuPeriods > 0) %>%
-    pull(incuPeriods) %>%
-    na.omit()
-  
+  d <- dataset_inc()
+  d$exposure_read   <- parse_date(d$date_of_exposure)
+  d$onset_read      <- parse_date(d$date_of_onset)
+  d$incubation_days <- as.numeric(d$onset_read - d$exposure_read)
+  d$status <- dplyr::case_when(
+    is.na(d$exposure_read) & is.na(d$onset_read) ~ "excluded: neither date could be read",
+    is.na(d$exposure_read)                       ~ "excluded: exposure date could not be read",
+    is.na(d$onset_read)                          ~ "excluded: onset date could not be read",
+    d$incubation_days <= 0                       ~ "excluded: onset falls on or before exposure",
+    TRUE                                         ~ "used"
+  )
+  d
+})
+
+get_incu_data <- function() {
+  d <- inc_checked()
+  data <- d$incubation_days[d$status == "used"]
+  data <- data[!is.na(data)]
   if(length(data) == 0) return(NULL)
   data
 }
@@ -662,13 +1230,14 @@ fit_results_inc <- reactive({
 renderUI({
   # ensure dataset is available
   req(dataset_inc())
-  # data preparation
-  ss <- nrow(dataset_inc())
+  # the number of incubation periods the model is fitted to, as on the other
+  # windows (rows that cannot be used are listed under dataset preview)
+  ss <- length(get_incu_data())
   # render the sample size text
   htmltools::div(
     style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
     htmltools::div(
-      style = "font-size: 30px; font-weight: bold; margin-bottom: 10px; text-align: center;font-family: Tw Cen MT;",
+      style = "font-size: 30px; font-weight: bold; margin-bottom: 10px; text-align: center;font-family: var(--epiparam-font);",
       ss
     )
   )
@@ -809,7 +1378,7 @@ renderHighchart({
       pd <- all_plot_data[[1]] # base hist data
       
       hc <- highchart() %>%
-        hc_chart(type = "line", style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF") %>%
+        hc_chart(type = "line", style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
         hc_title(text = "Combined Model Comparison", style = list(fontSize="16px", fontWeight="bold")) %>%
         hc_plotOptions(
           series = list(pointPlacement = "on"), # fix for axis alignment
@@ -861,7 +1430,7 @@ renderHighchart({
     } else {
       # sub-case b: side-by-side (composite) view
       hc <- highchart() %>%
-        hc_chart(type = "column", style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF") %>%
+        hc_chart(type = "column", style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
         hc_title(text = "Distribution Comparison", style = list(fontSize="16px", fontWeight="bold")) %>%
         hc_plotOptions(
           series = list(pointPlacement = "on"), # User Fix for alignment
@@ -927,7 +1496,7 @@ renderHighchart({
     nm <- tolower(m)
     
     highchart() %>%
-      hc_chart(style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF") %>%
+      hc_chart(style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
       hc_title(text = paste(str_to_title(m), "Distribution"), style = list(fontSize="16px", fontWeight="bold")) %>%      
       hc_plotOptions(
         series = list(pointPlacement = "on"), # fix for alignment
@@ -972,18 +1541,40 @@ renderHighchart({
 
 ```
 
-### Dataset Preview
+### Dataset Preview {.data-preview}
+
+```{r inc-data-check}
+renderUI({
+  d <- inc_checked()
+  data_check_panel(
+    n_read = nrow(d),
+    n_used = sum(d$status == "used"),
+    problems = problems_from_status(d$status, list(
+      "excluded: exposure date could not be read" =
+        unreadable_values(d$date_of_exposure, d$exposure_read),
+      "excluded: onset date could not be read" =
+        unreadable_values(d$date_of_onset, d$onset_read),
+      "excluded: neither date could be read" =
+        c(unreadable_values(d$date_of_exposure, d$exposure_read),
+          unreadable_values(d$date_of_onset, d$onset_read))
+    ))
+  )
+})
+```
 
 ```{r inc-dataset-preview}
 renderDataTable({
-  dataset_inc()
+  # the values as the app read them come first, so a date it could not read is
+  # visible without scrolling
+  dplyr::relocate(inc_checked(), status, exposure_read, onset_read, incubation_days)
 }, options = list(
-  pageLength = 10, 
+  pageLength = 10,
+  scrollX = TRUE,
   paging = TRUE, 
   striped = TRUE, 
   bordered = TRUE,
   hover = TRUE  
-), rownames = FALSE)
+), rownames = FALSE, fillContainer = FALSE)
 
 ```
 
@@ -1023,8 +1614,8 @@ hr()
 actionButton("run_bayes_inc", "Run Bayesian Model", icon = icon("play"), class = "btn-primary", width = "100%")
 
 hr()
-valueBox(value = tags$h6("Note: This model uses Bayesian MCMC (rstan). Calculations typically take 30-45 seconds.",
-                         style = "text-align: justify; font-family: Tw Cen MT; font-size: 16px; color: white;"), 
+valueBox(value = tags$h6("Note: This model uses Bayesian MCMC (rstan). Sampling usually takes under a minute. The first time EpiParam runs on a computer, the models are compiled once, in the background from the moment the app opens (one to three minutes each). The random seed is fixed, so the same data and settings always give the same result.",
+                         style = "text-align: justify; font-family: var(--epiparam-font); font-size: 16px; color: white;"), 
          color = "#333333")
 
 hr()
@@ -1041,8 +1632,8 @@ renderImage({
     contentType = 'image/png',
     width = 210,
     height = 60,
-    style = "position: fixed; bottom: 10px; left: 10px; cursor: pointer;",
-    onclick = "window.location.href = '[http://onehealth.or.kr/](http://onehealth.or.kr/)';"
+    style = "display: block; cursor: pointer;",
+    onclick = "window.location.href = 'http://onehealth.or.kr/';"
   )
 }, deleteFile = F)
 
@@ -1162,6 +1753,42 @@ bayes_inc_data <- reactive({
   df
 })
 
+# every row of the selection, with the dates as the app read them, the exposure
+# window it ended up using and a note of what became of the row. this repeats
+# the preparation the model does, so the preview shows the model's own view of
+# the file rather than the raw text.
+bayes_inc_checked <- reactive({
+  req(bayes_inc_global())
+  d <- bayes_inc_global()
+  if (input$sex_bayes_inc != "All" && "sex" %in% names(d)) {
+    d <- d %>% filter(sex == input$sex_bayes_inc)
+  }
+  if (input$age_bayes_inc != "All" && "age_group" %in% names(d)) {
+    d <- d %>% filter(age_group == input$age_bayes_inc)
+  }
+  
+  origin <- as.Date("2019-12-31")
+  tS <- as.integer(d$date_symp - origin)
+  tB <- as.integer(d$date_min  - origin)
+  tE <- as.integer(d$date_max  - origin)
+  tE <- ifelse(is.na(tE), tS, tE)          # no end date: exposure ran to onset
+  tB <- ifelse(is.na(tB), tE, tB)          # no start date: window has no width
+  tE <- ifelse(tE > tS, tS, tE)            # exposure cannot end after onset
+  
+  d$onset_read           <- d$date_symp
+  d$exposure_from        <- d$date_min
+  d$exposure_to          <- d$date_max
+  d$exposure_window_days <- tE - tB
+  d$days_to_onset        <- tS - tE
+  d$status <- dplyr::case_when(
+    is.na(d$date_symp)                    ~ "excluded: symptom onset date could not be read",
+    is.na(d$date_min) & is.na(d$date_max) ~ "excluded: no exposure date given",
+    tB > tE                               ~ "excluded: exposure window ends before it starts",
+    TRUE                                  ~ "used"
+  )
+  d
+})
+
 # modeling
 bayes_inc_fit <- eventReactive(input$run_bayes_inc, {
   
@@ -1200,7 +1827,8 @@ bayes_inc_fit <- eventReactive(input$run_bayes_inc, {
       object = mod,
       data = stan_data,
       chains = 4,
-      cores = 4,
+      cores = min(4, parallel::detectCores(), na.rm = TRUE),
+      seed = STAN_SEED,
       iter = input$iter_count_inc,
       warmup = input$iter_count_inc / 2,
       refresh = 0,
@@ -1240,7 +1868,7 @@ renderUI({
   htmltools::div(
     style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
     htmltools::div(
-      style = "font-size: 40px; font-weight: bold; margin-bottom: 5px; text-align: center; font-family: Tw Cen MT; color: #000000;",
+      style = "font-size: 40px; font-weight: bold; margin-bottom: 5px; text-align: center; font-family: var(--epiparam-font); color: #000000;",
       ss
     ),
     htmltools::div(
@@ -1320,19 +1948,40 @@ Column {.tabset .tabset-fade }
 -------------------------------
 
 
-### Dataset Preview
+### Dataset Preview {.data-preview}
 
 ```{r inc-bayes-dataset-preview}
 
+renderUI({
+  d <- bayes_inc_checked()
+  data_check_panel(
+    n_read = nrow(d),
+    n_used = sum(d$status == "used"),
+    problems = c(
+      problems_from_status(d$status, list(
+        "excluded: symptom onset date could not be read" =
+          unreadable_values(d$symptom_onset, d$date_symp)
+      )),
+      if (any(d$status == "used" & d$exposure_window_days == 0))
+        list(sprintf(paste("%d of the rows used have no exposure window: only one exposure date",
+                           "was given, so the app treats infection as having happened on that day."),
+                     sum(d$status == "used" & d$exposure_window_days == 0)))
+    )
+  )
+})
+
 renderDataTable({
-  bayes_inc_data()
+  # the model's view of the file: parsed dates, the window it used, and status
+  dplyr::relocate(bayes_inc_checked(), status, onset_read, exposure_from,
+                  exposure_to, exposure_window_days, days_to_onset)
 }, options = list(
-  pageLength = 10, 
+  pageLength = 10,
+  scrollX = TRUE,
   paging = TRUE, 
   striped = TRUE, 
   bordered = TRUE, 
   hover = TRUE  
-), rownames = FALSE)
+), rownames = FALSE, fillContainer = FALSE)
 
 ```
 
@@ -1362,20 +2011,20 @@ renderHighchart({
   menu_items <- list("viewFullscreen", "separator", "downloadPNG", "downloadPDF", "downloadSVG")
   
   # theme consistency
-  axis_title_style <- list(color = "#000000", fontSize = "16px", fontWeight = "bold", fontFamily = "Tw Cen MT")
-  axis_label_style <- list(color = "#000000", fontSize = "14px", fontWeight = "bold", fontFamily = "Tw Cen MT")
+  axis_title_style <- list(color = "#000000", fontSize = "16px", fontWeight = "bold", fontFamily = "Jost")
+  axis_label_style <- list(color = "#000000", fontSize = "14px", fontWeight = "bold", fontFamily = "Jost")
   
   highchart() %>%
-    hc_chart(style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF") %>%
+    hc_chart(style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
     
     hc_title(
       text = paste0("Posterior Predictive Distribution (", model_label, ")"),
-      style = list(fontSize = "18px", fontWeight = "bold", fontFamily = "Tw Cen MT", color = "#000000")
+      style = list(fontSize = "18px", fontWeight = "bold", fontFamily = "Jost", color = "#000000")
     ) %>%
     
     hc_subtitle(
       text = paste0("Based on ", res$iterations, " MCMC iterations"),
-      style = list(fontSize = "14px", fontFamily = "Tw Cen MT", color = "#666666")
+      style = list(fontSize = "14px", fontFamily = "Jost", color = "#666666")
     ) %>%
     
     hc_exporting(
@@ -1409,7 +2058,7 @@ renderHighchart({
       lineColor = "#000000", lineWidth = 1, tickColor = "#000000"
     ) %>%
     
-    hc_tooltip(valueDecimals = 4, style = list(fontFamily = "Tw Cen MT"))
+    hc_tooltip(valueDecimals = 4, style = list(fontFamily = "Jost"))
 })
 
 ```
@@ -1428,7 +2077,7 @@ renderPlotly({
     theme_bw() + 
     ggtitle("Trace Plot: Alpha & Sigma") +
     theme(
-      text = element_text(family = "Tw Cen MT"),
+      text = element_text(family = "Jost"),
       plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
       axis.title = element_text(size = 12, face = "bold"),
       axis.text = element_text(size = 10, color = "black"),
@@ -1447,7 +2096,7 @@ renderPlotly({
         scale = 2 
       )
     ) %>%
-    layout(font = list(family = "Tw Cen MT"))
+    layout(font = list(family = "Jost"))
 })
 
 ```
@@ -1495,8 +2144,8 @@ valueBox(
 hr()
 
 valueBox(
-  value = tags$h6("Note: Parametric models (Weibull/Gamma/Lognormal) are fit on (Data + 1) to handle zeros, then estimates are shifted back. Normal model is fit on raw data.",
-                  style = "text-align: justify; font-family: Tw Cen MT; font-size: 16px; color: white;"),
+  value = tags$h6("Note: The Weibull, Gamma and Lognormal models are defined only for positive values, so they are fit on the serial intervals moved to the right by k days, and the estimates are moved back. k is taken from the data, so negative serial intervals are kept rather than dropped. The Normal model is fit on the raw values.",
+                  style = "text-align: justify; font-family: var(--epiparam-font); font-size: 16px; color: white;"),
   color = "#FFFFFF")
 
 hr()
@@ -1507,8 +2156,8 @@ renderImage({
     contentType = 'image/png',
     width = 210,
     height = 60,
-    style = "position: fixed; bottom: 10px; left: 10px; cursor: pointer;",
-    onclick = "window.location.href = '[http://onehealth.or.kr/](http://onehealth.or.kr/)';"
+    style = "display: block; cursor: pointer;",
+    onclick = "window.location.href = 'http://onehealth.or.kr/';"
   )
 }, deleteFile = FALSE)
 
@@ -1557,6 +2206,11 @@ dataset_si <- eventReactive(list(input$file1_si, input$sex_si, input$age_group_s
       ))
   }
   
+  # keep what was typed, so the check panel can quote the values it could not use
+  dataset$id_as_given     <- as.character(dataset$id)
+  dataset$source_as_given <- as.character(dataset$source_of_infection)
+  dataset$onset_as_given  <- as.character(dataset$date_of_onset)
+  
   dataset$id <- as.numeric(gsub("[^0-9]", "", dataset$id))
   dataset$source_of_infection <- as.numeric(gsub("[^0-9]", "", dataset$source_of_infection))
   dataset$date_of_exposure <- parse_date(dataset$date_of_exposure)
@@ -1569,21 +2223,34 @@ dataset_si <- eventReactive(list(input$file1_si, input$sex_si, input$age_group_s
   dataset
 })
 
-get_serial_data <- function() {
+# every row of the selection, with the serial interval the app worked out and a
+# note of what became of it. a transmission link that points at a case which is
+# not in the file is now reported instead of quietly disappearing.
+si_checked <- reactive({
   req(dataset_si())
-  df <- dataset_si()
+  d <- dataset_si()
   
   required_cols <- c("id", "source_of_infection", "date_of_onset", "source_date")
-  if (!all(required_cols %in% names(df))) stop("required columns not found in dataset")
+  if (!all(required_cols %in% names(d))) stop("required columns not found in dataset")
   
-  df <- df %>%
-    filter(!is.na(date_of_onset), !is.na(source_date)) %>%
-    mutate(serial = as.numeric(date_of_onset - source_date)) %>%
-    filter(!is.na(serial))
-  
-  if (nrow(df) == 0) return(NULL)
-  
-  df$serial
+  d$serial_days <- as.numeric(d$date_of_onset - d$source_date)
+  known_source  <- !is.na(d$source_of_infection) & d$source_of_infection %in% d$id
+  d$status <- dplyr::case_when(
+    is.na(d$date_of_onset)       ~ "excluded: onset date could not be read",
+    is.na(d$source_of_infection) ~ "excluded: no source of infection given",
+    !known_source                ~ "excluded: the source of infection is not one of the case ids in this file",
+    is.na(d$source_date)         ~ "excluded: the source case has no readable onset date",
+    TRUE                         ~ "used"
+  )
+  d
+})
+
+get_serial_data <- function() {
+  d <- si_checked()
+  v <- d$serial_days[d$status == "used"]
+  v <- v[!is.na(v)]
+  if (!length(v)) return(NULL)
+  v
 }
 
 # master fitting logic for si
@@ -1595,10 +2262,15 @@ fit_results_si <- reactive({
   
   res <- list()
   for(m in models) {
-    # shift logic: normal model=0, others=1
-    shift_val <- if(m == "normal") 0 else 1
+    # shift logic. weibull, gamma and lognormal are defined only for positive
+    # values, so the serial intervals are moved to the right before fitting and
+    # the fitted distribution is moved back afterwards, in fit_parametric_model.
+    # the shift is taken from the data, k = 1 - min(si), so a negative serial
+    # interval is kept instead of being dropped. with nothing negative k is 1,
+    # which is what the app did before.
+    shift_val <- if(m == "normal") 0 else max(1, 1 - min(data))
     
-    # for non-normal models, we must ensure data + shift > 0.
+    # every value is positive after that shift; kept as a guard
     if(m != "normal") {
       valid_indices <- (data + shift_val) > 0
       data_for_fit <- data[valid_indices]
@@ -1629,11 +2301,13 @@ fit_results_si <- reactive({
 
 renderUI({
   req(dataset_si())
-  ss <- nrow(dataset_si())
+  # the number of serial intervals the model is fitted to, as on the other
+  # windows (rows that cannot be used are listed under dataset preview)
+  ss <- length(get_serial_data())
   htmltools::div(
     style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
     htmltools::div(
-      style = "font-size: 30px; font-weight: bold; margin-bottom: 10px; text-align: center;font-family: Tw Cen MT;",
+      style = "font-size: 30px; font-weight: bold; margin-bottom: 10px; text-align: center;font-family: var(--epiparam-font);",
       ss
     )
   )
@@ -1777,7 +2451,7 @@ renderHighchart({
       pd <- all_plot_data[[1]] # base hist
       
       hc <- highchart() %>%
-        hc_chart(type = "line", style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF") %>%
+        hc_chart(type = "line", style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
         hc_title(text = "Combined Model Comparison", style = list(fontSize="16px", fontWeight="bold")) %>%
         hc_plotOptions(
           series = list(pointPlacement = "on"), 
@@ -1819,7 +2493,7 @@ renderHighchart({
     } else {
       # sub-case b: side-by-side (composite) view with constant scale
       hc <- highchart() %>%
-        hc_chart(type = "column", style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF") %>%
+        hc_chart(type = "column", style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
         hc_title(text = "Distribution Comparison", style = list(fontSize="16px", fontWeight="bold")) %>%
         hc_plotOptions(
           series = list(pointPlacement = "on"),
@@ -1878,7 +2552,7 @@ renderHighchart({
     nm <- tolower(m)
     
     highchart() %>%
-      hc_chart(style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF") %>%
+      hc_chart(style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
       hc_title(text = paste(str_to_title(m), "Distribution"), style = list(fontSize="16px", fontWeight="bold")) %>%      
       hc_plotOptions(
         series = list(pointPlacement = "on"), 
@@ -1912,29 +2586,49 @@ renderHighchart({
 
 ```
 
-### Dataset Preview
+### Dataset Preview {.data-preview}
 
 ```{r}
 
+renderUI({
+  d <- si_checked()
+  known_source <- !is.na(d$source_of_infection) & d$source_of_infection %in% d$id
+  data_check_panel(
+    n_read = nrow(d),
+    n_used = sum(d$status == "used"),
+    problems = problems_from_status(d$status, list(
+      "excluded: onset date could not be read" =
+        unreadable_values(d$onset_as_given, d$date_of_onset),
+      "excluded: the source of infection is not one of the case ids in this file" =
+        unique(d$source_as_given[!known_source & !is.na(d$source_of_infection)])
+    ))
+  )
+})
+
 renderDataTable({
-  req(dataset_si())
-  dataset <- dataset_si()
+  d <- si_checked()
   
   # ensure date columns are formatted as strings in yyyy-mm-dd
-  dataset$date_of_exposure <- as.Date(dataset$date_of_exposure)
-  dataset$date_of_onset <- as.Date(dataset$date_of_onset)
-  dataset$source_date <- as.Date(dataset$source_date)
+  d$date_of_exposure <- as.Date(d$date_of_exposure)
+  d$date_of_onset <- as.Date(d$date_of_onset)
+  d$source_date <- as.Date(d$source_date)
+  
+  # what the app made of the file comes first
+  dataset <- dplyr::relocate(d, status, id, source_of_infection,
+                             date_of_onset, source_date, serial_days)
   
   datatable(
     dataset,
     options = list(
       pageLength = 10,
+      scrollX = TRUE,
       paging = TRUE,
       striped = TRUE,
       bordered = TRUE,
       hover = TRUE
     ),
-    rownames = FALSE
+    rownames = FALSE,
+    fillContainer = FALSE
   )
 })
 
@@ -1975,8 +2669,8 @@ hr()
 actionButton("run_bayes_si", "Run Bayesian Model", icon = icon("play"), class = "btn-primary", width = "100%")
 
 hr()
-valueBox(value = tags$h6("Note: This model estimates Serial Interval by linking Infectors to Infectees. Ensure 'Source of infection' IDs match 'id'.",
-                         style = "text-align: justify; font-family: Tw Cen MT; font-size: 16px; color: white;"), 
+valueBox(value = tags$h6("Note: This model estimates Serial Interval by linking Infectors to Infectees. Ensure 'Source of infection' IDs match 'id'. The random seed is fixed, so the same data and settings always give the same result.",
+                         style = "text-align: justify; font-family: var(--epiparam-font); font-size: 16px; color: white;"), 
          color = "#333333")
 
 hr()
@@ -1993,8 +2687,8 @@ renderImage({
     contentType = 'image/png',
     width = 210,
     height = 60,
-    style = "position: fixed; bottom: 10px; left: 10px; cursor: pointer;",
-    onclick = "window.location.href = '[http://onehealth.or.kr/](http://onehealth.or.kr/)';"
+    style = "display: block; cursor: pointer;",
+    onclick = "window.location.href = 'http://onehealth.or.kr/';"
   )
 }, deleteFile = F)
 
@@ -2088,9 +2782,21 @@ bayes_si_data <- reactive({
         as.integer(onset_max_infectee - onset_min_infectee)/2
     ) 
   
-  if (input$bayes_model_select_si != "Normal") {
-    df_final <- df_final %>% filter(tSymptomOnset > tStartExposure)
+  # weibull, gamma and lognormal need a positive serial interval. rather than
+  # dropping the pairs where the infectee fell ill before, or on the same day
+  # as, the infector, the onsets are moved to the right by k days and the
+  # fitted distribution is moved back when the results are shown. k covers the
+  # whole exposure window, so every draw of tE stays below the onset. when no
+  # pair needs it, k is 0 and nothing about the fit changes.
+  si_shift <- 0
+  if (input$bayes_model_select_si != "Normal" && nrow(df_final) > 0) {
+    need <- max(df_final$tEndExposure - df_final$tSymptomOnset)
+    if (need >= 0) {
+      si_shift <- need + 1
+      df_final$tSymptomOnset <- df_final$tSymptomOnset + si_shift
+    }
   }
+  df_final$si_shift <- si_shift
   
   n_final <- nrow(df_final)
   n_dropped <- n_before_cleaning - n_final
@@ -2110,6 +2816,35 @@ bayes_si_data <- reactive({
   }
   
   df_final
+})
+
+# every row of the selection, with the link the app resolved and a note of what
+# became of it. a source of infection that is not itself a case in the file is
+# reported here rather than quietly dropped by the join.
+bayes_si_checked <- reactive({
+  req(bayes_si_global())
+  d <- bayes_si_global()
+  if (input$sex_bayes_si != "All" && "sex" %in% names(d)) {
+    d <- d %>% filter(sex == input$sex_bayes_si)
+  }
+  if (input$age_bayes_si != "All" && "age_group" %in% names(d)) {
+    d <- d %>% filter(age_group == input$age_bayes_si)
+  }
+  
+  full <- bayes_si_global()
+  i <- match(d$source_clean, full$id_clean)
+  d$onset_read          <- d$onset_min
+  d$source_onset_read   <- full$onset_min[i]
+  d$serial_days         <- as.numeric(d$onset_min - full$onset_min[i])
+  known <- !is.na(d$source_clean) & nzchar(d$source_clean) & d$source_clean %in% full$id_clean
+  d$status <- dplyr::case_when(
+    is.na(d$onset_min)                             ~ "excluded: onset date could not be read",
+    is.na(d$source_clean) | !nzchar(d$source_clean) ~ "excluded: no source of infection given",
+    !known                                          ~ "excluded: the source of infection is not one of the case ids in this file",
+    is.na(full$onset_min[i])                        ~ "excluded: the source case has no readable onset date",
+    TRUE                                            ~ "used"
+  )
+  d
 })
 
 # modeling
@@ -2148,8 +2883,9 @@ bayes_si_fit <- eventReactive(input$run_bayes_si, {
     fit <- rstan::sampling(
       object = mod, 
       data = stan_data,
-      chains = 4, 
-      cores = 4, 
+      chains = 4,
+      cores = min(4, parallel::detectCores(), na.rm = TRUE),
+      seed = STAN_SEED,
       iter = input$iter_count_si, 
       warmup = input$iter_count_si / 2,
       refresh = 0,
@@ -2168,6 +2904,7 @@ bayes_si_fit <- eventReactive(input$run_bayes_si, {
       fit_obj = fit,
       iterations = input$iter_count_si,
       model_name = input$bayes_model_select_si,
+      shift = if ("si_shift" %in% names(df)) df$si_shift[1] else 0,
       alpha = params$alphaInc,
       sigma = params$sigmaInc,
       alpha_summary = quantile(params$alphaInc, probs = c(0.025, 0.5, 0.975)),
@@ -2192,7 +2929,7 @@ renderUI({
   htmltools::div(
     style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
     htmltools::div(
-      style = "font-size: 40px; font-weight: bold; margin-bottom: 5px; text-align: center; font-family: Tw Cen MT; color: #000000;",
+      style = "font-size: 40px; font-weight: bold; margin-bottom: 5px; text-align: center; font-family: var(--epiparam-font); color: #000000;",
       ss
     ),
     htmltools::div(
@@ -2234,7 +2971,10 @@ renderDT({
     `Upper_95_CrI` = round(c(res$alpha_summary[3], res$sigma_summary[3]), 3)
   )
   
-  mean_summ <- quantile(post_means, probs = c(0.025, 0.5, 0.975))
+  # the model was fitted to serial intervals moved to the right by res$shift,
+  # so the mean is moved back before it is shown
+  si_shift <- if (!is.null(res$shift)) res$shift else 0
+  mean_summ <- quantile(post_means - si_shift, probs = c(0.025, 0.5, 0.975))
   
   df_mean <- data.frame(
     Parameter = "Mean Serial Interval",
@@ -2244,6 +2984,15 @@ renderDT({
   )
   
   final_df <- rbind(df_stats, df_mean)
+  
+  # make the shift visible: the two parameters above describe the shifted
+  # distribution, the mean has been moved back on to the observed scale
+  if (si_shift > 0) {
+    final_df <- rbind(final_df, data.frame(
+      Parameter = "Shift applied (days)",
+      Median = si_shift, Lower_95_CrI = NA, Upper_95_CrI = NA
+    ))
+  }
   
   fname <- paste0("Serial_Interval_Bayesian_Stats_", Sys.Date())
   
@@ -2269,19 +3018,38 @@ renderDT({
 Column {.tabset .tabset-fade }
 -------------------------------
 
-### Dataset Preview
+### Dataset Preview {.data-preview}
 
 ```{r si-bayes-dataset-preview}
 
+renderUI({
+  d <- bayes_si_checked()
+  full <- bayes_si_global()
+  known <- !is.na(d$source_clean) & nzchar(d$source_clean) & d$source_clean %in% full$id_clean
+  data_check_panel(
+    n_read = nrow(d),
+    n_used = sum(d$status == "used"),
+    problems = problems_from_status(d$status, list(
+      "excluded: onset date could not be read" =
+        unreadable_values(d$date_of_onsetmin, d$onset_min),
+      "excluded: the source of infection is not one of the case ids in this file" =
+        unique(d$source_of_infection[!known & !is.na(d$source_clean) & nzchar(d$source_clean)])
+    ))
+  )
+})
+
 renderDataTable({
-  bayes_si_data()
+  # the pairs as the app resolved them, with the status of each row
+  dplyr::relocate(bayes_si_checked(), status, id_clean, source_clean,
+                  onset_read, source_onset_read, serial_days)
 }, options = list(
   pageLength = 10,
+  scrollX = TRUE,
   paging = TRUE,
   striped = TRUE,
   bordered = TRUE,
   hover = TRUE
-), rownames = FALSE)
+), rownames = FALSE, fillContainer = FALSE)
 
 ```
 
@@ -2295,6 +3063,7 @@ renderHighchart({
   
   alpha_est <- median(res$alpha)
   sigma_est <- median(res$sigma)
+  si_shift  <- if (!is.null(res$shift)) res$shift else 0
   
   # dynamic x-axis range logic
   if (res$model_name == "Normal") {
@@ -2305,9 +3074,10 @@ renderHighchart({
     x_vals <- seq(lower_bound, upper_bound, length.out = 300)
     x_min_limit <- NULL # let chart auto-scale to show negatives
   } else {
-    # for strictly positive models, fix range 0 to 30
-    x_vals <- seq(0, 30, length.out = 300)
-    x_min_limit <- 0
+    # strictly positive models are fitted on the shifted scale, so the density
+    # is calculated there and drawn back on the observed scale below
+    x_vals <- seq(0, 30 + si_shift, length.out = 300)
+    x_min_limit <- if (si_shift > 0) NULL else 0
   }
   
   # dynamic density calculation
@@ -2323,22 +3093,22 @@ renderHighchart({
   
   model_label <- tools::toTitleCase(res$model_name)
   menu_items <- list("viewFullscreen", "separator", "downloadPNG", "downloadPDF", "downloadSVG")
-  axis_style <- list(color = "#000000", fontSize = "14px", fontWeight = "bold", fontFamily = "Tw Cen MT")
+  axis_style <- list(color = "#000000", fontSize = "14px", fontWeight = "bold", fontFamily = "Jost")
   
   highchart() %>%
     hc_chart(
-      style = list(fontFamily = "Tw Cen MT"), 
+      style = list(fontFamily = "Jost"), 
       backgroundColor = "#FFFFFF"
     ) %>%
     
     hc_title(
       text = paste0("Posterior Predictive Distribution (", model_label, ")"),
-      style = list(fontSize = "18px", fontWeight = "bold", fontFamily = "Tw Cen MT", color = "#000000")
+      style = list(fontSize = "18px", fontWeight = "bold", fontFamily = "Jost", color = "#000000")
     ) %>%
     
     hc_subtitle(
       text = paste0("Based on ", res$iterations, " MCMC iterations"),
-      style = list(fontSize = "14px", fontFamily = "Tw Cen MT", color = "#666666")
+      style = list(fontSize = "14px", fontFamily = "Jost", color = "#666666")
     ) %>%
     
     hc_exporting(
@@ -2348,7 +3118,7 @@ renderHighchart({
     ) %>%
     
     hc_add_series(
-      data = data.frame(x = x_vals, y = y_vals), 
+      data = data.frame(x = x_vals - si_shift, y = y_vals), 
       type = "area", 
       name = "Posterior Density", 
       color = "rgba(255, 140, 0, 0.5)",
@@ -2378,7 +3148,7 @@ renderHighchart({
       tickColor = "#000000"
     ) %>%
     
-    hc_tooltip(valueDecimals = 4, style = list(fontFamily = "Tw Cen MT"))
+    hc_tooltip(valueDecimals = 4, style = list(fontFamily = "Jost"))
 })
 
 ```
@@ -2396,7 +3166,7 @@ renderPlotly({
     theme_bw() +
     ggtitle("Trace Plot: Alpha & Sigma") + 
     theme(
-      text = element_text(family = "Tw Cen MT"),
+      text = element_text(family = "Jost"),
       plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
       axis.title = element_text(size = 12, face = "bold"),
       axis.text = element_text(size = 10, color = "black"),
@@ -2415,8 +3185,405 @@ renderPlotly({
         scale = 2
       )
     ) %>%
-    layout(font = list(family = "Tw Cen MT"))
+    layout(font = list(family = "Jost"))
 })
+
+```
+
+
+$R_t$ {data-orientation=rows}
+=========================================
+
+Sidebar {.sidebar}
+---------------------
+
+```{r rt-sidebar}
+hr()
+selectInput("rt_source", "Incidence Data",
+            choices = c("Upload a file" = "upload",
+                        "File loaded on the Incubation Period tab" = "inc",
+                        "File loaded on the Serial Interval tab" = "si"),
+            selected = "upload")
+
+conditionalPanel(
+  condition = "input.rt_source == 'upload'",
+  fileInput("file1_rt", "Choose CSV File",
+            multiple = FALSE,
+            accept = c("text/csv", "text/comma-separated-values,text/plain", ".csv"))
+)
+hr()
+
+selectInput("rt_si_source", "Serial Interval",
+            choices = c("Estimated on the Serial Interval tab" = "app",
+                        "Enter the mean and SD" = "manual"),
+            selected = "app")
+
+conditionalPanel(
+  condition = "input.rt_si_source == 'manual'",
+  numericInput("rt_mean_si", "Mean Serial Interval (days)", value = 12.0, min = 1.01, step = 0.1),
+  numericInput("rt_std_si", "SD of Serial Interval (days)", value = 5.2, min = 0.1, step = 0.1)
+)
+hr()
+
+sliderInput("rt_window", "Sliding Window (days)", value = 7, min = 2, max = 21, step = 1)
+
+hr()
+
+valueBox(
+  value = downloadButton("downloadMockRt", "Download Mock Data", icon = icon("download")),
+  color = "#FFFFFF"
+)
+
+hr()
+
+valueBox(
+  value = tags$h6("Note: Rt is estimated with the method of Cori et al. (2013), using the EpiEstim package, over sliding windows of the length set above. Incidence is counted by date of onset. The serial interval is taken from the Serial Interval tab or entered by hand; the manual defaults of 12.0 and 5.2 days suit the mock data.",
+                  style = "text-align: justify; font-family: var(--epiparam-font); font-size: 16px; color: white;"),
+  color = "#FFFFFF")
+
+hr()
+# logo image
+renderImage({
+  list(
+    src = "one_logo.png",
+    contentType = 'image/png',
+    width = 210,
+    height = 60,
+    style = "display: block; cursor: pointer;",
+    onclick = "window.location.href = 'http://onehealth.or.kr/';"
+  )
+}, deleteFile = FALSE)
+
+```
+
+
+```{r rt-data-processing}
+
+# the Rt tab estimates from a file of its own, or from the file already loaded on
+# the incubation period or serial interval tab, so one outbreak dataset can serve
+# all three analyses
+rt_file <- reactive({
+  src <- input$rt_source
+  f <- switch(src,
+              inc    = input$file1_inc,
+              si     = input$file1_si,
+              upload = input$file1_rt)
+  req(f)
+  d <- read.csv(f$datapath[1], stringsAsFactors = FALSE)
+  d <- data.frame(lapply(d, trimws), stringsAsFactors = FALSE)
+  clean_names(d)
+})
+
+# every row, with the onset date as the app read it and a note of what became of
+# the row. the incubation and serial interval files call the column date_of_onset,
+# the mock data calls it date_onset; both are accepted.
+rt_checked <- reactive({
+  d <- rt_file()
+  col <- intersect(c("date_of_onset", "date_onset"), names(d))[1]
+  validate(need(!is.na(col),
+    "incorrect dataset: the Rt tab needs a 'date of onset' (or 'date onset') column."))
+  raw   <- as.character(d[[col]])
+  blank <- is.na(raw) | !nzchar(trimws(raw)) |
+           toupper(trimws(raw)) %in% c("NA", "N/A", "NULL", "-", "ASYMPTOMATIC")
+  d$onset_as_given <- raw
+  d$onset_read     <- parse_date(raw)
+  d$status <- dplyr::case_when(
+    blank               ~ "excluded: no onset date given",
+    is.na(d$onset_read) ~ "excluded: onset date could not be read",
+    TRUE                ~ "used"
+  )
+  d
+})
+
+# daily incidence by date of onset, with the days that had no case filled in as zero
+rt_incidence <- reactive({
+  d <- rt_checked()
+  dates <- d$onset_read[d$status == "used"]
+  validate(need(length(dates) > 0, "no usable onset dates in this file."))
+  inc <- tibble::tibble(dates = dates) %>%
+    dplyr::count(dates, name = "I") %>%
+    tidyr::complete(dates = seq(min(dates), max(dates), by = "day"), fill = list(I = 0))
+  as.data.frame(inc)
+})
+
+# the serial interval behind the estimate: the fit already made on the serial
+# interval tab, as the reviewer asked, or a mean and sd typed in by the user
+rt_si <- reactive({
+  if (identical(input$rt_si_source, "manual")) {
+    return(list(label = "entered by hand", mean = input$rt_mean_si, sd = input$rt_std_si))
+  }
+  req(input$file1_si)
+  res <- fit_results_si()
+  validate(need(!is.null(res) && length(res) > 0,
+    "the Serial Interval tab could not fit a model to its data, so there is no estimate to use."))
+  # the model chosen on that tab; when it shows all of them, the best fit by AIC
+  by_aic <- length(res) > 1
+  best <- if (!by_aic) res[[1]] else
+    res[[which.min(vapply(res, function(x) x$aic, numeric(1)))]]
+  list(label = paste0(tools::toTitleCase(tolower(best$model)), " fit",
+                      if (by_aic) " (lowest AIC)" else "", ", Serial Interval tab"),
+       mean  = unname(best$moments["mean"]),
+       sd    = sqrt(unname(best$moments["var"])))
+})
+
+# Rt by the method of Cori et al. (2013): EpiEstim with a parametric serial interval
+rt_result <- reactive({
+  inc <- rt_incidence()
+  si  <- rt_si()
+  w   <- input$rt_window
+  validate(
+    need(is.numeric(si$mean) && length(si$mean) == 1 && is.finite(si$mean) && si$mean > 1,
+         sprintf("the method of Cori et al. needs a mean serial interval above 1 day; the value in use is %s.",
+                 format(round(as.numeric(si$mean), 2)))),
+    need(is.numeric(si$sd) && length(si$sd) == 1 && is.finite(si$sd) && si$sd > 0,
+         "the standard deviation of the serial interval must be above 0."),
+    need(nrow(inc) >= w + 1,
+         sprintf("a %d-day window needs at least %d days of incidence, and this data covers %d. Shorten the window or use a longer series.",
+                 w, w + 1, nrow(inc)))
+  )
+  # windows of w days sliding one day at a time, starting on day 2 as EpiEstim requires
+  t_start <- seq(2, nrow(inc) - w + 1)
+  t_end   <- t_start + w - 1
+  warn <- character(0)
+  res <- withCallingHandlers(
+    EpiEstim::estimate_R(
+      incid  = inc,
+      method = "parametric_si",
+      config = EpiEstim::make_config(list(mean_si = si$mean, std_si = si$sd,
+                                          t_start = t_start, t_end = t_end))
+    ),
+    warning = function(x) { warn <<- c(warn, conditionMessage(x)); invokeRestart("muffleWarning") },
+    message = function(m) invokeRestart("muffleMessage")
+  )
+  est <- res$R
+  list(
+    res = res, si = si, inc = inc, window = w,
+    table = data.frame(
+      window_start = res$dates[est$t_start],
+      window_end   = res$dates[est$t_end],
+      mean_rt      = est[["Mean(R)"]],
+      median_rt    = est[["Median(R)"]],
+      lower_95     = est[["Quantile.0.025(R)"]],
+      upper_95     = est[["Quantile.0.975(R)"]]
+    ),
+    warnings = unique(warn)
+  )
+})
+
+rt_box <- function(value) {
+  htmltools::div(
+    style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
+    htmltools::div(
+      style = "font-size: 30px; font-weight: bold; margin-bottom: 10px; text-align: center;font-family: var(--epiparam-font);",
+      value
+    )
+  )
+}
+
+```
+
+
+## Row {data-height="180"}
+
+### Cases
+
+```{r rt-cases}
+
+renderUI({
+  inc <- rt_incidence()
+  rt_box(format(sum(inc$I), big.mark = ","))
+})
+
+```
+
+### Serial Interval
+
+```{r rt-si-used}
+
+renderUI({
+  si <- rt_si()
+  rt_box(sprintf("%.2f days", si$mean))
+})
+
+```
+
+### Latest Rt
+
+```{r rt-latest}
+
+renderUI({
+  r <- rt_result()
+  last <- utils::tail(r$table, 1)
+  rt_box(sprintf("%.2f", last$mean_rt))
+})
+
+```
+
+Column {.tabset .tabset-fade }
+-------------------------------
+
+### Rt Over Time
+
+```{r rt-plot}
+
+renderHighchart({
+  r <- rt_result()
+  t <- r$table
+  axis_style  <- list(color = "#000000", fontSize = "16px", fontWeight = "bold")
+  label_style <- list(color = "#000000", fontSize = "14px", fontWeight = "bold")
+  menu_items  <- list("viewFullscreen", "separator", "downloadPNG", "downloadPDF", "downloadSVG")
+  ts <- highcharter::datetime_to_timestamp(t$window_end)
+  band <- lapply(seq_len(nrow(t)), function(i) list(x = ts[i], low = t$lower_95[i], high = t$upper_95[i]))
+  line <- lapply(seq_len(nrow(t)), function(i) list(x = ts[i], y = t$mean_rt[i]))
+
+  hc <- highchart() %>%
+    hc_chart(style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
+    hc_title(text = "Effective Reproduction Number (Rt)",
+             style = list(fontSize = "16px", fontWeight = "bold")) %>%
+    hc_xAxis(type = "datetime", title = list(text = "Date (last day of window)", style = axis_style),
+             labels = list(style = label_style), lineColor = "#000000", lineWidth = 1, tickColor = "#000000") %>%
+    hc_yAxis(min = 0, title = list(text = "Rt", style = axis_style), labels = list(style = label_style),
+             plotLines = list(list(value = 1, color = "#C0392B", width = 1.5, dashStyle = "Dash", zIndex = 5,
+                                   label = list(text = "Rt = 1", align = "right",
+                                                style = list(color = "#C0392B", fontWeight = "bold"))))) %>%
+    hc_add_series(type = "arearange", name = "95% credible interval", data = band,
+                  color = "#8B5A00", fillOpacity = 0.22, lineWidth = 0, marker = list(enabled = FALSE)) %>%
+    hc_add_series(type = "line", name = "Mean Rt", data = line,
+                  color = "#8B5A00", lineWidth = 2.5, marker = list(enabled = FALSE)) %>%
+    hc_tooltip(shared = TRUE, valueDecimals = 2, xDateFormat = "%d %b %Y") %>%
+    hc_exporting(enabled = TRUE, filename = paste0("Rt_", Sys.Date()),
+                 buttons = list(contextButton = list(menuItems = menu_items)))
+  hc
+})
+
+```
+
+### Incidence
+
+```{r rt-incidence-plot}
+
+renderHighchart({
+  inc <- rt_incidence()
+  axis_style  <- list(color = "#000000", fontSize = "16px", fontWeight = "bold")
+  label_style <- list(color = "#000000", fontSize = "14px", fontWeight = "bold")
+  menu_items  <- list("viewFullscreen", "separator", "downloadPNG", "downloadPDF", "downloadSVG")
+  ts  <- highcharter::datetime_to_timestamp(inc$dates)
+  pts <- lapply(seq_len(nrow(inc)), function(i) list(x = ts[i], y = inc$I[i]))
+
+  highchart() %>%
+    hc_chart(type = "column", style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
+    hc_title(text = "Daily Incidence by Date of Onset", style = list(fontSize = "16px", fontWeight = "bold")) %>%
+    hc_xAxis(type = "datetime", title = list(text = "Date of onset", style = axis_style),
+             labels = list(style = label_style), lineColor = "#000000", lineWidth = 1, tickColor = "#000000") %>%
+    hc_yAxis(min = 0, allowDecimals = FALSE, title = list(text = "Cases", style = axis_style),
+             labels = list(style = label_style)) %>%
+    hc_plotOptions(column = list(pointPadding = 0, groupPadding = 0, borderWidth = 0.2, borderColor = "#FFFFFF")) %>%
+    hc_add_series(type = "column", name = "Cases", data = pts, color = "#DAA520") %>%
+    hc_legend(enabled = FALSE) %>%
+    hc_tooltip(xDateFormat = "%d %b %Y") %>%
+    hc_exporting(enabled = TRUE, filename = paste0("Incidence_", Sys.Date()),
+                 buttons = list(contextButton = list(menuItems = menu_items)))
+})
+
+```
+
+### Serial Interval Distribution
+
+```{r rt-si-plot}
+
+renderHighchart({
+  r <- rt_result()
+  p <- as.numeric(r$res$si_distr)
+  day <- seq_along(p) - 1
+  # show the distribution up to the day by which almost all of its mass has fallen
+  last_day <- max(which(cumsum(p) <= 0.999)) + 1
+  last_day <- min(max(last_day, 2), length(p))
+  axis_style  <- list(color = "#000000", fontSize = "16px", fontWeight = "bold")
+  label_style <- list(color = "#000000", fontSize = "14px", fontWeight = "bold")
+  menu_items  <- list("viewFullscreen", "separator", "downloadPNG", "downloadPDF", "downloadSVG")
+
+  highchart() %>%
+    hc_chart(type = "column", style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF") %>%
+    hc_title(text = "Serial Interval Used for Rt", style = list(fontSize = "16px", fontWeight = "bold")) %>%
+    hc_xAxis(categories = as.character(day[seq_len(last_day)]),
+             title = list(text = "Serial interval (days)", style = axis_style), labels = list(style = label_style)) %>%
+    hc_yAxis(min = 0, title = list(text = "Probability", style = axis_style), labels = list(style = label_style)) %>%
+    hc_plotOptions(column = list(pointPadding = 0.05, groupPadding = 0, borderWidth = 0)) %>%
+    hc_add_series(type = "column", name = "Probability", data = round(p[seq_len(last_day)], 4), color = "#228B22") %>%
+    hc_legend(enabled = FALSE) %>%
+    hc_exporting(enabled = TRUE, filename = paste0("Serial_Interval_Used_", Sys.Date()),
+                 buttons = list(contextButton = list(menuItems = menu_items)))
+})
+
+```
+
+### Estimates
+
+```{r rt-table}
+
+renderDT({
+  t <- rt_result()$table
+  out <- data.frame(
+    `Window start`  = format(t$window_start, "%Y-%m-%d"),
+    `Window end`    = format(t$window_end, "%Y-%m-%d"),
+    `Mean Rt`       = round(t$mean_rt, 3),
+    `Median Rt`     = round(t$median_rt, 3),
+    `Lower 95% CrI` = round(t$lower_95, 3),
+    `Upper 95% CrI` = round(t$upper_95, 3),
+    check.names = FALSE
+  )
+  fname <- paste0("Rt_estimates_", Sys.Date())
+  datatable(
+    out, rownames = FALSE, extensions = "Buttons",
+    options = list(
+      dom = "Bfrtip",
+      buttons = list(list(extend = "csv", filename = fname),
+                     list(extend = "excel", filename = fname),
+                     list(extend = "pdf", filename = fname)),
+      pageLength = 15,
+      # EpiEstim gives no estimate for windows that end before the mean serial
+      # interval; say so rather than leaving the cells empty
+      columnDefs = list(list(targets = 2:5, render = DT::JS(
+        "function(data, type) { return (data === null && type === 'display') ? 'not estimable' : data; }"
+      )))
+    )
+  ) %>%
+    formatStyle(columns = names(out), `font-size` = "12px")
+}, server = FALSE)   # the whole table goes to the browser, so CSV/Excel/PDF export every window, not just the page on screen
+
+```
+
+### Dataset Preview {.data-preview}
+
+```{r rt-data-check}
+
+renderUI({
+  d <- rt_checked()
+  data_check_panel(
+    n_read = nrow(d),
+    n_used = sum(d$status == "used"),
+    problems = problems_from_status(d$status, list(
+      "excluded: onset date could not be read" =
+        unique(d$onset_as_given[d$status == "excluded: onset date could not be read"])
+    ))
+  )
+})
+
+```
+
+```{r rt-dataset-preview}
+
+renderDataTable({
+  # the onset date as the app read it comes first, with what became of each row
+  dplyr::relocate(rt_checked(), status, onset_read)
+}, options = list(
+  pageLength = 10,
+  scrollX = TRUE,
+  paging = TRUE,
+  striped = TRUE,
+  bordered = TRUE,
+  hover = TRUE
+), rownames = FALSE, fillContainer = FALSE)
 
 ```
 
@@ -2440,7 +3607,7 @@ selectInput(inputId = "cluster_kr", label = "Select cluster:",
 hr()
 valueBox(
   value = tags$h6("Note: Superspreading event is an event in which an infectious disease is spread much more than usual. Superspreader: An unusually contagious individual infected with a disease. The superspreading potential is estimated through the R₀ (Basic Reproduction number) and Kappa (variation in individual infectiousness).", 
-                  style = "text-align: justify; font-family: Gill Sans MT; font-size: 16px; color: white;"),
+                  style = "text-align: justify; font-family: var(--epiparam-font); font-size: 16px; color: white;"),
   color = "#FFFFFF"
 )
 hr()
@@ -2456,7 +3623,7 @@ renderImage({
     contentType = 'image/png',
     width = 210,
     height = 60,
-    style = "position: fixed; bottom: 10px; left: 10px; cursor: pointer;",
+    style = "display: block; cursor: pointer;",
     onclick = "window.location.href = 'http://onehealth.or.kr/';"
   )
 }, deleteFile = FALSE)
@@ -2533,7 +3700,7 @@ renderUI({
   htmltools::div(
     style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
     htmltools::div(
-      style = "font-size: 30px; font-weight: bold; margin-bottom: 10px; text-align: center;font-family: Tw Cen MT;",
+      style = "font-size: 30px; font-weight: bold; margin-bottom: 10px; text-align: center;font-family: var(--epiparam-font);",
       ss
     ),
     htmltools::div(
@@ -2689,10 +3856,10 @@ renderHighchart({
           fontSize = "20px", 
           fontWeight = "bold", 
           color = "#000000", 
-          fontFamily = "Tw Cen MT"
+          fontFamily = "Jost"
         )
       ) %>%
-      hc_chart(style = list(fontFamily = "Tw Cen MT"), backgroundColor = "#FFFFFF")
+      hc_chart(style = list(fontFamily = "Jost"), backgroundColor = "#FFFFFF")
   } else {
     # calculate negative binomial distribution
     xvalue <- 0:max(res$offtk)
@@ -2760,7 +3927,7 @@ renderHighchart({
       ) %>%
       hc_title(
         text = paste("Cluster:", input$cluster_kr),
-        style = list(fontSize = "16px", fontFamily = "Tw Cen MT", fontWeight = "bold")
+        style = list(fontSize = "16px", fontFamily = "Jost", fontWeight = "bold")
       ) %>%
       hc_tooltip(
         shared = TRUE,
@@ -2786,7 +3953,7 @@ renderHighchart({
         )
       ) %>%
       hc_legend(enabled = FALSE) %>%
-      hc_chart(style = list(fontFamily = "Tw Cen MT"))
+      hc_chart(style = list(fontFamily = "Jost"))
   }
 })
 
@@ -3138,11 +4305,52 @@ output$full_network_plot <- renderVisNetwork({
 
 ```
 
-### Dataset Preview
+### Dataset Preview {.data-preview}
+
+```{r kappa-r0-data-check}
+renderUI({
+  d   <- filtered_dataset_kr()
+  rel <- as.character(d$transmission_relationship)
+  n_links <- vapply(rel, function(r) nrow(parse_transmission_chain(r)),
+                    integer(1), USE.NAMES = FALSE)
+  blank <- is.na(rel) | !nzchar(trimws(rel)) | tolower(trimws(rel)) == "unknown"
+  # a row with no arrow is an index case, which is normal. a row that looks like
+  # it was meant to be a chain but uses some other separator is not, and used to
+  # be dropped without a word.
+  other_sep <- !blank & n_links == 0 &
+    grepl("->|=>|>|,|;|/|\\bto\\b", rel, ignore.case = TRUE)
+  
+  problems <- list()
+  if (any(other_sep)) {
+    problems <- c(problems, list(sprintf(
+      paste("%d row%s give a transmission relationship the app could not read: chains must be",
+            "written with the arrow \u2192, as in \u201c#1 \u2192 #4\u201d (for example: %s)."),
+      sum(other_sep), if (sum(other_sep) == 1) "" else "s",
+      paste0("\u201c", utils::head(unique(rel[other_sep]), 3), "\u201d", collapse = ", "))))
+  }
+  if (any(blank)) {
+    problems <- c(problems, list(sprintf(
+      "%d row%s have no transmission relationship, and contribute no link.",
+      sum(blank), if (sum(blank) == 1) "" else "s")))
+  }
+  data_check_panel(
+    n_read = nrow(d),
+    n_used = sum(n_links > 0),
+    problems = problems,
+    used_label = "with an onward transmission link",
+    out_label  = "index cases with none"
+  )
+})
+```
 
 ```{r kappa-r0-dataset-preview}
 renderDataTable({
-  filtered_dataset_kr()
-}, options = list(pageLength = 10), rownames = FALSE)
+  d <- filtered_dataset_kr()
+  # how many onward links the app actually read out of each row
+  d$links_read <- vapply(as.character(d$transmission_relationship),
+                         function(r) nrow(parse_transmission_chain(r)),
+                         integer(1), USE.NAMES = FALSE)
+  dplyr::relocate(d, links_read, transmission_relationship)
+}, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE, fillContainer = FALSE)
 
 ```
