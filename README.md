@@ -75,28 +75,32 @@ After downloading the source code from this repository, to launch the applicatio
 Here are example screenshots of the application before analysis.
 
 
-<img width="1917" height="977" alt="image (10)" src="https://github.com/user-attachments/assets/d0af4b24-4c95-4f6e-a69f-6b36e8864df9" />
+<img width="1910" height="960" alt="image" src="https://github.com/user-attachments/assets/9ceac6d7-a70c-40c2-84b3-7b8c9b1568a7" />
+
 
 
 The application has 6 modules (windows). 
 # 1. Incubation Period
 This window estimates the incubation period using MLE parametric models including the lognormal, weibull and gamma models.
 
-<img width="1915" height="978" alt="image (11)" src="https://github.com/user-attachments/assets/9600e1de-1b5d-4ff5-8750-75be7241437c" />
+<img width="1636" height="827" alt="image" src="https://github.com/user-attachments/assets/44da4c7f-2924-4b86-b1b6-58a2bfd3855a" />
+
 
 # 2. Incubation Period (Bayesian)
 This window estimates the incubation period using parametric Bayesian models. 
 
-<img width="1911" height="981" alt="image (12)" src="https://github.com/user-attachments/assets/768cb01e-29bb-484f-b015-182a6ba2c9e4" />
+<img width="1636" height="827" alt="image" src="https://github.com/user-attachments/assets/f7fa1a5e-1559-4aa1-b722-df4fbf4245f3" />
 
 # 3. Serial interval 
 This window estimates the incubation period using MLE parametric models including the lognormal, weibull, gamma and normal models.
 
-<img width="1906" height="979" alt="image (13)" src="https://github.com/user-attachments/assets/75f479e9-018e-4914-8890-645d36515748" />
+<img width="1603" height="818" alt="image" src="https://github.com/user-attachments/assets/ec492963-50c7-4ac1-bc9c-de0841ebf7f4" />
+
 
 # 4. Serial interval (Bayesian)
 This window estimates the serial interval using parametric Bayesian models. 
-<img width="1904" height="961" alt="image (14)" src="https://github.com/user-attachments/assets/4e30b30f-e548-418b-b3ec-906e6cb066c2" />
+<img width="1603" height="810" alt="image" src="https://github.com/user-attachments/assets/c20e1fb8-8458-4511-9449-805a9639962a" />
+
 
 # 5. Effective reproduction number (Rt)
 This window estimates the time-varying reproduction number, Rt, with the method of Cori et al. (2013) as implemented in the EpiEstim package (`estimate_R`, parametric serial interval). Incidence is counted by date of onset, and Rt is estimated over sliding windows whose length can be set in the sidebar (7 days by default).
@@ -104,11 +108,14 @@ This window estimates the time-varying reproduction number, Rt, with the method 
 * **Incidence data**: upload a file, or reuse the file already loaded on the Incubation Period or Serial Interval window. Any file with a date of onset for each case can be used; the column may be called `date of onset` or `date onset`, and dates may be day-month-year, year-month-day or month-day-year.
 * **Serial interval**: by default the estimate made on the Serial Interval window is used, taking the distribution selected there (or, when all four are shown, the one with the lowest AIC). A mean and standard deviation can instead be entered by hand, which is useful when there are no transmission pairs to estimate it from. The method requires a mean serial interval above 1 day.
 * **Outputs**: the number of cases, the mean serial interval used and the latest Rt; Rt over time with its 95% credible interval, daily incidence, the discretised serial interval actually used, and a table of estimates for every window that can be downloaded as CSV, Excel or PDF.
+  
+<img width="975" height="493" alt="image" src="https://github.com/user-attachments/assets/825024b7-4194-44d1-bc4a-3be24ae048e3" />
 
 Reference: Cori A, Ferguson NM, Fraser C, Cauchemez S. A new framework and software to estimate time-varying reproduction numbers during epidemics. *American Journal of Epidemiology* 2013;178(9):1505-1512. https://doi.org/10.1093/aje/kwt133
 
-# k and R0
-Estimates the R0 and K values using generation of transmission pairs.
-<img width="1908" height="993" alt="image (15)" src="https://github.com/user-attachments/assets/58333d18-ff2d-4b21-8c42-a3359537d783" />
+# k and Re
+Estimates the Re and K values using generation of transmission pairs.
+<img width="917" height="466" alt="image" src="https://github.com/user-attachments/assets/21974661-2f39-45cc-b2af-6fd0d76696c1" />
+
 
 
