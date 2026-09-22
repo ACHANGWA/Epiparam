@@ -3588,7 +3588,7 @@ renderDataTable({
 ```
 
 
-$k$ and $R_0$ {data-orientation=rows}
+$k$ and $R_e$ {data-orientation=rows}
 =======================================
 
 Sidebar {.sidebar}
@@ -3630,9 +3630,9 @@ renderImage({
 
 ```
 
-```{r k-and-r0-data-processing}
+```{r k-and-re-data-processing}
 
-# reactive data for k and r0 - filtered by selected cluster
+# reactive data for k and re - filtered by selected cluster
 dataset_kr <- eventReactive(input$file1_kr, {
   req(input$file1_kr)
   dataset <- read.csv(input$file1_kr$datapath)
@@ -3642,7 +3642,7 @@ dataset_kr <- eventReactive(input$file1_kr, {
   # validation start
   validate(
     need(all(c("cluster_id", "transmission_relationship") %in% names(dataset)),
-         "incorrect dataset: please upload k and r0 data containing 'cluster id' and 'transmission relationship'.")
+         "incorrect dataset: please upload k and re data containing 'cluster id' and 'transmission relationship'.")
   )
   # validation end
   
@@ -3727,7 +3727,7 @@ renderDT({
   
   if (is.null(res) || is.null(res$fit)) {
     df <- data.frame(
-      parameter = c("R₀", "Kappa"),
+      parameter = c("Rₑ", "Kappa"),
       value = rep("No data available", 2),
       check.names = FALSE  
     )
@@ -3740,7 +3740,7 @@ renderDT({
     fit_df <- dplyr::select(fit_df, parameter, value) %>%
       mutate(
         parameter = gsub("size", "Kappa", parameter),
-        parameter = gsub("mu", "R₀", parameter),
+        parameter = gsub("mu", "Rₑ", parameter),
         value = round(value, 3)
       ) %>%
       head(4)
@@ -3785,7 +3785,7 @@ renderDT({
   
   if (is.null(res) || is.null(res$fit)) {
     df <- data.frame(
-      parameter = c("R₀", "Kappa"),
+      parameter = c("Rₑ", "Kappa"),
       `2.5 %` = rep("No data available", 2),
       `97.5 %` = rep("No data available", 2),
       check.names = FALSE  
@@ -3798,7 +3798,7 @@ renderDT({
     conf_df <- dplyr::select(conf_df, parameter, `2.5 %`, `97.5 %`) %>%
       mutate(
         parameter = gsub("size", "Kappa", parameter),
-        parameter = gsub("mu", "R₀", parameter),
+        parameter = gsub("mu", "Rₑ", parameter),
         `2.5 %` = round(`2.5 %`, 3),
         `97.5 %` = round(`97.5 %`, 3)
       )
@@ -4307,7 +4307,7 @@ output$full_network_plot <- renderVisNetwork({
 
 ### Dataset Preview {.data-preview}
 
-```{r kappa-r0-data-check}
+```{r kappa-re-data-check}
 renderUI({
   d   <- filtered_dataset_kr()
   rel <- as.character(d$transmission_relationship)
@@ -4343,7 +4343,7 @@ renderUI({
 })
 ```
 
-```{r kappa-r0-dataset-preview}
+```{r kappa-re-dataset-preview}
 renderDataTable({
   d <- filtered_dataset_kr()
   # how many onward links the app actually read out of each row
