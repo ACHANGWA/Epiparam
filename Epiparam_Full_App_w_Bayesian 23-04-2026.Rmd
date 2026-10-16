@@ -356,8 +356,11 @@ data_check_panel <- function(n_read, n_used, problems = list(),
 }
 
 # helper functions for model fitting (MLE pages)
-fit_parametric_model <- function(data, dist, shift_val = 0) {
-  data_fit <- data + shift_val
+# the model is fitted to the serial intervals as they are. the data used to be
+# moved to the right by max(1, 1 - min(data)), a value read off the most
+# negative observation.
+fit_parametric_model <- function(data, dist) {
+  data_fit <- data
   
   fit <- tryCatch({
     MASS::fitdistr(data_fit, dist)
@@ -412,23 +415,14 @@ fit_parametric_model <- function(data, dist, shift_val = 0) {
     )
   }
   
-  # a skewed distribution fitted to data moved to the right is a shifted
-  # distribution: report the shift next to its parameters, and put the moments
-  # back on to the observed scale
-  if (shift_val != 0) {
-    raw_params <- rbind(raw_params,
-                        data.frame(parameter = "shift.applied",
-                                   value = round(shift_val, 2)))
-  }
-
-  final_mean <- as.numeric(mean_val) - shift_val
+  final_mean <- as.numeric(mean_val)
   final_var <- as.numeric(var_val)
-  final_ci <- as.numeric(ci_95) - shift_val
+  final_ci <- as.numeric(ci_95)
   
   list(
     model = toupper(dist),
     fit_obj = fit,
-    shift = shift_val,
+    n = length(data_fit),
     raw_params_df = raw_params,
     moments = c(mean=final_mean, var=final_var, ci95=final_ci),
     aic = AIC(fit),
@@ -473,16 +467,12 @@ get_plot_data_si <- function(data, fit_res) {
   hist_data <- hist(data, plot = FALSE, breaks = h_breaks)
   hist_df <- data.frame(from = hist_data$breaks[-length(hist_data$breaks)], to = hist_data$breaks[-1], y = hist_data$density, x = hist_data$mids)
   
-  # the shift the model was actually fitted with, so the curve lines up with
-  # the histogram of the observed values
-  shift_val <- if (!is.null(fit_res$shift)) fit_res$shift else
-                 if (tolower(fit_res$model) == "normal") 0 else 1
+  # the fit is on the observed scale, so the curve is drawn there
   est <- fit_res$fit_obj$estimate
   d_name <- tolower(fit_res$model)
   x_vals <- seq(min(data) - 5, max(data) + 5, length.out = 500)
-  x_trans <- x_vals + shift_val
-  
-  if(shift_val > 0) x_trans[x_trans <= 0] <- NA
+  x_trans <- x_vals
+  if (d_name != "normal") x_trans[x_trans <= 0] <- NA
   
   suppressWarnings({
     y_vals <- tryCatch({
@@ -529,120 +519,342 @@ get_plot_data_si <- function(data, fit_res) {
 # between these two markers, so the models stay defined in exactly one place.
 # please keep them in place.
 
-STAN_MODELS <- c("Lognormal", "Weibull", "Gamma", "Normal")
+STAN_TASKS <- c("incubation", "serial")
+STAN_DISTS <- c("Lognormal", "Weibull", "Gamma", "Normal")
 
-# bayesian helper: the stan source each model is built from
-get_stan_code <- function(model_name = "Weibull") {
+# the incubation period and the serial interval no longer share a model. a
+# model is named for the analysis it belongs to as well as for the
+# distribution it fits.
+stan_model_id    <- function(task, dist) paste0(task, "_", dist)
+stan_model_task  <- function(model_name) sub("_.*$", "", model_name)
+stan_model_dist  <- function(model_name) sub("^.*_", "", model_name)
+stan_model_label <- function(model_name)
+  paste(sub("^serial$", "serial interval", stan_model_task(model_name)),
+        tolower(stan_model_dist(model_name)))
 
-  if (model_name == "Weibull") {
-    return("
+# the default model of each bayesian page first, so that the background
+# compilation reaches them before the others
+STAN_MODELS <- c("incubation_Lognormal", "serial_Normal",
+                 "incubation_Weibull", "incubation_Gamma", "incubation_Normal",
+                 "serial_Lognormal", "serial_Weibull", "serial_Gamma")
+
+# the EpiParam default priors: weakly informative, the same for both analyses
+STAN_PRIOR_DEFAULTS <- list(
+  Normal    = list(p1 = c(0, 10),     p2 = c(0, 10)),
+  Lognormal = list(p1 = c(log(5), 2), p2 = c(0, 1)),
+  Gamma     = list(p1 = c(0, 1),      p2 = c(-1, 1)),
+  Weibull   = list(p1 = c(0, 1),      p2 = c(log(5), 1))
+)
+
+# how each pair of numbers reads on the sidebar
+STAN_PRIOR_LABELS <- list(
+  Normal    = list(p1 = c("Mean (\u03bc): Normal",       "mean",    "sd"),
+                   p2 = c("SD (\u03c3): Half-Normal",    "scale",   "")),
+  Lognormal = list(p1 = c("Meanlog (\u03bclog): Normal", "mean",    "sd"),
+                   p2 = c("SDlog (\u03c3log): Half-Normal", "scale", "")),
+  Gamma     = list(p1 = c("Shape (\u03b1): Lognormal",   "meanlog", "sdlog"),
+                   p2 = c("Rate (\u03b2): Lognormal",    "meanlog", "sdlog")),
+  Weibull   = list(p1 = c("Shape (k): Lognormal",    "meanlog", "sdlog"),
+                   p2 = c("Scale (\u03bb): Lognormal",   "meanlog", "sdlog"))
+)
+
+stan_dist_title <- function(dist) {
+  d <- tolower(dist)
+  c(normal = "Normal", lognormal = "Lognormal", gamma = "Gamma", weibull = "Weibull")[[d]]
+}
+
+# the two prior statements of a model, written with the numbers in use
+stan_prior_block <- function(dist, pri) {
+  n <- function(x) format(x, digits = 10, trim = TRUE, scientific = FALSE)
+  switch(
+    tolower(dist),
+    normal    = sprintf("      mu ~ normal(%s, %s);\n      sigma ~ normal(0, %s);",
+                        n(pri$p1[1]), n(pri$p1[2]), n(pri$p2[2])),
+    lognormal = sprintf("      mu_log ~ normal(%s, %s);\n      sigma_log ~ normal(0, %s);",
+                        n(pri$p1[1]), n(pri$p1[2]), n(pri$p2[2])),
+    gamma     = sprintf("      shape ~ lognormal(%s, %s);\n      rate  ~ lognormal(%s, %s);",
+                        n(pri$p1[1]), n(pri$p1[2]), n(pri$p2[1]), n(pri$p2[2])),
+    weibull   = sprintf("      shape ~ lognormal(%s, %s);\n      scale ~ lognormal(%s, %s);",
+                        n(pri$p1[1]), n(pri$p1[2]), n(pri$p2[1]), n(pri$p2[2]))
+  )
+}
+
+# the priors behind a result, in words
+stan_prior_text <- function(dist, pri) {
+  d <- stan_dist_title(dist)
+  if (d %in% c("Normal", "Lognormal"))
+    sprintf("%s(%s, %s) \u00b7 half-%s(0, %s)",
+            if (d == "Normal") "Normal" else "Normal", signif(pri$p1[1], 4), signif(pri$p1[2], 4),
+            "Normal", signif(pri$p2[2], 4))
+  else
+    sprintf("Lognormal(%s, %s) \u00b7 Lognormal(%s, %s)",
+            signif(pri$p1[1], 4), signif(pri$p1[2], 4), signif(pri$p2[1], 4), signif(pri$p2[2], 4))
+}
+
+# the two parameters of each distribution, as they are named in the stan code
+STAN_PARS <- list(
+  Normal    = c("mu", "sigma"),
+  Lognormal = c("mu_log", "sigma_log"),
+  Gamma     = c("shape", "rate"),
+  Weibull   = c("shape", "scale")
+)
+stan_pars <- function(dist) STAN_PARS[[dist]]
+
+# the lognormal, gamma and weibull distributions are defined only for positive
+# values; the normal distribution is not
+stan_dist_positive <- function(dist) !identical(dist, "Normal")
+
+# ---------------------------------------------------------------------------
+# the incubation period
+#
+# the exposure interval is the window of possible infection times, and the
+# symptom onset date is observed. the position of the infection inside the
+# window is a parameter, so the uncertainty of the exposure window is carried
+# through to the estimate.
+# ---------------------------------------------------------------------------
+get_stan_code_incubation <- function(dist = c("normal", "lognormal",
+                                              "gamma", "weibull"),
+                                     priors = NULL) {
+
+  dist <- match.arg(dist)
+
+  likelihood <- switch(
+    dist,
+    normal    = "      incubation ~ normal(mu, sigma);",
+    lognormal = "      incubation ~ lognormal(mu_log, sigma_log);",
+    gamma     = "      incubation ~ gamma(shape, rate);",
+    weibull   = "      incubation ~ weibull(shape, scale);"
+  )
+
+  parameters <- switch(
+    dist,
+    normal    = "  real mu;\n  real<lower=0> sigma;",
+    lognormal = "  real mu_log;\n  real<lower=0> sigma_log;",
+    gamma     = "  real<lower=0> shape;\n  real<lower=0> rate;",
+    weibull   = "  real<lower=0> shape;\n  real<lower=0> scale;"
+  )
+
+  # the priors. the family of each one is fixed; the two numbers are the
+  # EpiParam defaults unless the sidebar supplies the user's own.
+  pri    <- if (is.null(priors)) STAN_PRIOR_DEFAULTS[[stan_dist_title(dist)]] else priors
+  priors <- stan_prior_block(dist, pri)
+
+  loglik <- switch(
+    dist,
+    normal    = "    log_lik[i] = normal_lpdf(incubation[i] | mu, sigma);",
+    lognormal = "    log_lik[i] = lognormal_lpdf(incubation[i] | mu_log, sigma_log);",
+    gamma     = "    log_lik[i] = gamma_lpdf(incubation[i] | shape, rate);",
+    weibull   = "    log_lik[i] = weibull_lpdf(incubation[i] | shape, scale);"
+  )
+
+  paste0(
+"
 data {
-  int<lower=0> N;
+  int<lower=1> N;
+
+  // Beginning and end of possible exposure/infection interval
   vector[N] tStartExposure;
   vector[N] tEndExposure;
+
+  // Observed symptom-onset time
   vector[N] tSymptomOnset;
 }
-parameters {
-  real<lower=0> alphaInc; // shape
-  real<lower=0> sigmaInc; // scale
-  vector<lower=0, upper=1>[N] uE;
-}
-transformed parameters {
-  vector[N] tE;
-  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
-}
-model {
-  // priors
-  alphaInc ~ lognormal(log(2.0), 1.0);
-  sigmaInc ~ lognormal(log(3.0), 1.0);
 
-  // likelihood
-  target += weibull_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+parameters {
+
+  // Position of infection time within each exposure interval.
+  // 0 = beginning of interval, 1 = end of interval
+  vector<lower=0, upper=1>[N] exposure_fraction;
+
+", parameters, "
+}
+
+transformed parameters {
+
+  vector[N] tInfection;
+  vector[N] incubation;
+
+  for (i in 1:N) {
+
+    tInfection[i] =
+      tStartExposure[i] +
+      exposure_fraction[i] *
+      (tEndExposure[i] - tStartExposure[i]);
+
+    incubation[i] =
+      tSymptomOnset[i] - tInfection[i];
+  }
+}
+
+model {
+
+  // Uniform prior over possible infection time
+  exposure_fraction ~ uniform(0, 1);
+
+", priors, "
+
+", likelihood, "
+}
+
+generated quantities {
+
+  vector[N] log_lik;
+
+  for (i in 1:N) {
+", loglik, "
+  }
 }
 ")
-  }
-  else if (model_name == "Gamma") {
-    return("
+}
+
+# ---------------------------------------------------------------------------
+# the serial interval
+#
+# both onset dates are reported as an interval, so the position of each onset
+# inside its own interval is a parameter: the uncertainty of the infector AND
+# of the infectee is carried through to the estimate.
+# ---------------------------------------------------------------------------
+get_stan_code_serial_interval <- function(dist = c("normal", "lognormal",
+                                                   "gamma", "weibull"),
+                                          priors = NULL) {
+
+  dist <- match.arg(dist)
+
+  parameters <- switch(
+    dist,
+    normal    = "  real mu;\n  real<lower=0> sigma;",
+    lognormal = "  real mu_log;\n  real<lower=0> sigma_log;",
+    gamma     = "  real<lower=0> shape;\n  real<lower=0> rate;",
+    weibull   = "  real<lower=0> shape;\n  real<lower=0> scale;"
+  )
+
+  # the priors. the family of each one is fixed; the two numbers are the
+  # EpiParam defaults unless the sidebar supplies the user's own.
+  pri    <- if (is.null(priors)) STAN_PRIOR_DEFAULTS[[stan_dist_title(dist)]] else priors
+  priors <- stan_prior_block(dist, pri)
+
+  likelihood <- switch(
+    dist,
+    normal    = "      serial_interval ~ normal(mu, sigma);",
+    lognormal = "      serial_interval ~ lognormal(mu_log, sigma_log);",
+    gamma     = "      serial_interval ~ gamma(shape, rate);",
+    weibull   = "      serial_interval ~ weibull(shape, scale);"
+  )
+
+  loglik <- switch(
+    dist,
+    normal    = "    log_lik[i] = normal_lpdf(serial_interval[i] | mu, sigma);",
+    lognormal = "    log_lik[i] = lognormal_lpdf(serial_interval[i] | mu_log, sigma_log);",
+    gamma     = "    log_lik[i] = gamma_lpdf(serial_interval[i] | shape, rate);",
+    weibull   = "    log_lik[i] = weibull_lpdf(serial_interval[i] | shape, scale);"
+  )
+
+  paste0(
+"
 data {
-  int<lower=0> N;
-  vector[N] tStartExposure;
-  vector[N] tEndExposure;
-  vector[N] tSymptomOnset;
-}
-parameters {
-  real<lower=0> alphaInc; // shape
-  real<lower=0> sigmaInc; // rate
-  vector<lower=0, upper=1>[N] uE;
-}
-transformed parameters {
-  vector[N] tE;
-  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
-}
-model {
-  // priors
-  alphaInc ~ lognormal(log(2.0), 1.0);
-  sigmaInc ~ lognormal(log(0.66), 1.0);
 
-  // likelihood
-  target += gamma_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+  int<lower=1> N;
+
+  // Infector symptom-onset interval
+  vector[N] infectorOnsetStart;
+  vector[N] infectorOnsetEnd;
+
+  // Infectee symptom-onset interval
+  vector[N] infecteeOnsetStart;
+  vector[N] infecteeOnsetEnd;
+}
+
+parameters {
+
+  // Unknown position of true onset within each reported interval
+  vector<lower=0, upper=1>[N] infector_fraction;
+  vector<lower=0, upper=1>[N] infectee_fraction;
+
+", parameters, "
+}
+
+transformed parameters {
+
+  vector[N] infector_onset;
+  vector[N] infectee_onset;
+  vector[N] serial_interval;
+
+  for (i in 1:N) {
+
+    // Sample latent symptom onset for infector
+    infector_onset[i] =
+      infectorOnsetStart[i] +
+      infector_fraction[i] *
+      (infectorOnsetEnd[i] -
+       infectorOnsetStart[i]);
+
+    // Sample latent symptom onset for infectee
+    infectee_onset[i] =
+      infecteeOnsetStart[i] +
+      infectee_fraction[i] *
+      (infecteeOnsetEnd[i] -
+       infecteeOnsetStart[i]);
+
+    // Serial interval derived from both latent onset times
+    serial_interval[i] =
+      infectee_onset[i] -
+      infector_onset[i];
+  }
+}
+
+model {
+
+  // Uniform uncertainty across each reported onset interval
+  infector_fraction ~ uniform(0, 1);
+  infectee_fraction ~ uniform(0, 1);
+
+", priors, "
+
+", likelihood, "
+}
+
+generated quantities {
+
+  vector[N] log_lik;
+
+  for (i in 1:N) {
+", loglik, "
+  }
 }
 ")
-  }
-  else if (model_name == "Lognormal") {
-    return("
-data {
-  int<lower=0> N;
-  vector[N] tStartExposure;
-  vector[N] tEndExposure;
-  vector[N] tSymptomOnset;
 }
-parameters {
-  real alphaInc;          // meanlog
-  real<lower=0> sigmaInc; // sdlog
-  vector<lower=0, upper=1>[N] uE;
-}
-transformed parameters {
-  vector[N] tE;
-  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
-}
-model {
-  // priors
-  alphaInc ~ normal(log(3.0), 1.0);
-  sigmaInc ~ normal(0, 1.0);
 
-  // likelihood
-  target += lognormal_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+# the source of one named model, for the cache and the background compilation
+get_stan_code <- function(model_name = "incubation_Lognormal") {
+  task <- stan_model_task(model_name)
+  dist <- stan_model_dist(model_name)
+  if (!task %in% STAN_TASKS || !dist %in% STAN_DISTS) return(NULL)
+  if (identical(task, "incubation")) get_stan_code_incubation(tolower(dist))
+  else                               get_stan_code_serial_interval(tolower(dist))
 }
-")
-  }
-  else if (model_name == "Normal") {
-    return("
-data {
-  int<lower=0> N;
-  vector[N] tStartExposure;
-  vector[N] tEndExposure;
-  vector[N] tSymptomOnset;
-}
-parameters {
-  real alphaInc;          // mean
-  real<lower=0> sigmaInc; // sd
-  vector<lower=0, upper=1>[N] uE;
-}
-transformed parameters {
-  vector[N] tE;
-  tE = tStartExposure + uE .* (tEndExposure - tStartExposure);
-}
-model {
-  // priors
-  alphaInc ~ normal(3.0, 1.0);
-  sigmaInc ~ normal(0, 1.0);
 
-  // likelihood
-  target += normal_lpdf((tSymptomOnset - tE) + 0.1 | alphaInc, sigmaInc);
+# ---------------------------------------------------------------------------
+# which cases and which pairs a model can use
+#
+# the lognormal, gamma and weibull distributions are defined only for positive
+# values, so a case or a pair whose dates make a positive delay impossible
+# cannot be used by them: the likelihood of such a row is zero whatever the
+# parameters are, and the sampler cannot even start. they are set aside and
+# counted, and the normal model keeps all of them.
+# ---------------------------------------------------------------------------
+incubation_usable <- function(tStartExposure, tEndExposure, tSymptomOnset, positive = TRUE) {
+  ok <- is.finite(tStartExposure) & is.finite(tEndExposure) & is.finite(tSymptomOnset) &
+        tStartExposure <= tEndExposure
+  if (positive) ok <- ok & (tSymptomOnset - tStartExposure) > 0
+  ok
 }
-")
-  }
-  return(NULL)
+
+serial_usable <- function(infectorOnsetStart, infectorOnsetEnd,
+                          infecteeOnsetStart, infecteeOnsetEnd, positive = TRUE) {
+  ok <- is.finite(infectorOnsetStart) & is.finite(infectorOnsetEnd) &
+        is.finite(infecteeOnsetStart) & is.finite(infecteeOnsetEnd)
+  if (positive) ok <- ok & (infecteeOnsetEnd - infectorOnsetStart) > 0
+  ok
 }
 
 # where the models compiled on this computer are kept. set EPIPARAM_STAN_CACHE
@@ -762,7 +974,7 @@ stan_build <- function(model_name) {
   if (!stan_lock_take(model_name)) return(invisible(FALSE))
   on.exit(unlink(stan_lock_dir(model_name), recursive = TRUE), add = TRUE)
   unlink(stan_error_file(model_name))
-  message("compiling the ", tolower(model_name), " model for this computer")
+  message("compiling the ", stan_model_label(model_name), " model for this computer")
   mod <- tryCatch(
     rstan::stan_model(model_code = code,
                       model_name = paste0("epiparam_", tolower(model_name))),
@@ -853,7 +1065,7 @@ stan_start_build <- function(models) {
 # when the app opens: start compiling, in the background, the models this
 # computer does not have yet, the default model of each bayesian page first.
 # set EPIPARAM_STAN_PREPARE=false to switch this off.
-stan_prepare_models <- function(models = c("Lognormal", "Normal", "Weibull", "Gamma")) {
+stan_prepare_models <- function(models = STAN_MODELS) {
   if (identical(tolower(Sys.getenv("EPIPARAM_STAN_PREPARE")), "false")) return(invisible(FALSE))
   job <- stan_job()
   if (!is.null(job) && job$is_alive()) return(invisible(TRUE))
@@ -897,15 +1109,15 @@ stan_wait_for_model <- function(model_name) {
     job_alive <- !is.null(job) && job$is_alive()
     if (busy) {
       since <- tryCatch(file.mtime(stan_lock_dir(model_name)), error = function(e) started)
-      stan_note(paste0("compiling the ", tolower(model_name), " model for this computer ",
+      stan_note(paste0("compiling the ", stan_model_label(model_name), " model for this computer ",
                        "(first run only, usually one to three minutes): ",
                        stan_elapsed(difftime(Sys.time(), since, units = "secs"))), on_console)
     } else if (job_alive) {
       # the background process is busy with another model: this one is next
       try(writeLines(model_name, stan_next_file()), silent = TRUE)
       other <- Filter(stan_lock_busy, setdiff(STAN_MODELS, model_name))
-      stan_note(paste0(if (length(other)) paste0("finishing the ", tolower(other[1]), " model; ") else "",
-                       "the ", tolower(model_name), " model is compiled next (first run only): ",
+      stan_note(paste0(if (length(other)) paste0("finishing the ", stan_model_label(other[1]), " model; ") else "",
+                       "the ", stan_model_label(model_name), " model is compiled next (first run only): ",
                        stan_elapsed(difftime(Sys.time(), started, units = "secs"))), on_console)
     } else if (own) {
       return(TRUE)    # the compilation ended without a model; the caller reports why
@@ -920,7 +1132,7 @@ stan_wait_for_model <- function(model_name) {
 # what to tell the user when the machine has no working C++ toolchain
 stan_build_help <- function(model_name, err) {
   paste0(
-    "The ", model_name, " model could not be compiled on this computer.\n\n",
+    "The ", stan_model_label(model_name), " model could not be compiled on this computer.\n\n",
     "EpiParam builds the Bayesian models the first time they are used, and that needs\n",
     "a working C++ toolchain:\n",
     "  Windows   install Rtools from https://cran.r-project.org/bin/windows/Rtools/\n",
@@ -932,7 +1144,7 @@ stan_build_help <- function(model_name, err) {
 }
 
 # the compiled model, from wherever it is available (see the notes above)
-get_compiled_stan_model <- function(model_name = "Weibull") {
+get_compiled_stan_model <- function(model_name = "incubation_Lognormal") {
 
   code <- get_stan_code(model_name)
   if (is.null(code)) stop("unknown bayesian model: ", model_name, call. = FALSE)
@@ -964,7 +1176,7 @@ get_compiled_stan_model <- function(model_name = "Weibull") {
   }
 
   # and in this R session when that is not possible
-  stan_note(paste0("compiling the ", tolower(model_name),
+  stan_note(paste0("compiling the ", stan_model_label(model_name),
                    " model for this computer (first run only, usually one to three minutes)"))
   mod <- tryCatch(
     rstan::stan_model(model_code = code,
@@ -975,10 +1187,152 @@ get_compiled_stan_model <- function(model_name = "Weibull") {
   keep(mod)
 }
 
+# ---------------------------------------------------------------------------
+# a model with the user's own priors
+#
+# the priors live in the stan program, so a custom prior is a different
+# program and has to be compiled on its own: the named models in the cache are
+# the ones with the EpiParam defaults. a custom program is kept in the same
+# cache folder under the fingerprint of its text, so the second run with the
+# same priors starts at once.
+# ---------------------------------------------------------------------------
+stan_code_fingerprint <- function(code) {
+  f <- tempfile(fileext = ".stan")
+  writeLines(code, f)
+  on.exit(unlink(f), add = TRUE)
+  substr(unname(tools::md5sum(f)), 1, 10)
+}
+
+stan_model_with_priors <- function(task, dist, priors = NULL) {
+  # the defaults are the models the app ships with
+  if (is.null(priors) ||
+      isTRUE(all.equal(priors, STAN_PRIOR_DEFAULTS[[stan_dist_title(dist)]]))) {
+    return(get_compiled_stan_model(stan_model_id(task, dist)))
+  }
+  code <- if (identical(task, "incubation")) get_stan_code_incubation(tolower(dist), priors)
+          else                              get_stan_code_serial_interval(tolower(dist), priors)
+  name <- paste0("custom_", task, "_", tolower(dist), "_", stan_code_fingerprint(code))
+  obj  <- paste0("stan_model_", name)
+  if (exists(obj, envir = .GlobalEnv)) {
+    mod <- get(obj, envir = .GlobalEnv)
+    if (stan_model_usable(mod, code)) return(mod)
+  }
+  mod <- stan_read_model(stan_cache_file(name), code, remove_stale = TRUE)
+  if (is.null(mod)) {
+    stan_note(paste0("compiling the ", tolower(dist), " model with your priors ",
+                     "(one to three minutes; the EpiParam default priors need no compiling)"))
+    mod <- tryCatch(rstan::stan_model(model_code = code, model_name = paste0("epiparam_", name)),
+                    error = function(e) stop(stan_build_help(name, conditionMessage(e)), call. = FALSE))
+    try(saveRDS(mod, stan_cache_file(name)), silent = TRUE)
+  }
+  assign(obj, mod, envir = .GlobalEnv)
+  mod
+}
+
 # --- stan helpers: end --------------------------------------------------
 
 # the block above as text, for the separate R process that compiles the models
 STAN_HELPERS_TEXT <- stan_helpers_text()
+
+
+# the sampler's own report on a run: rhat and the effective sample size for
+# each parameter, and the number of divergent transitions
+stan_fit_diagnostics <- function(res) {
+  s <- tryCatch(rstan::summary(res$fit_obj, pars = res$pars)$summary,
+                error = function(e) NULL)
+  div <- tryCatch(rstan::get_num_divergent(res$fit_obj), error = function(e) NA_integer_)
+  if (is.null(s)) return(NULL)
+  list(table = data.frame(Parameter = rownames(s),
+                          Rhat  = round(s[, "Rhat"], 3),
+                          n_eff = round(s[, "n_eff"]),
+                          row.names = NULL),
+       divergent = div)
+}
+
+# the same, as something to put on the page
+stan_diagnostics_output <- function(res) {
+  d <- stan_fit_diagnostics(res)
+  if (is.null(d)) return(htmltools::div("the sampler returned no diagnostics for this run."))
+  rows <- lapply(seq_len(nrow(d$table)), function(i)
+    htmltools::tags$tr(
+      htmltools::tags$td(style = "padding: 3px 18px 3px 0;", d$table$Parameter[i]),
+      htmltools::tags$td(style = "padding: 3px 18px 3px 0;", format(d$table$Rhat[i], nsmall = 3)),
+      htmltools::tags$td(style = "padding: 3px 18px 3px 0;", format(d$table$n_eff[i]))))
+  htmltools::div(
+    style = "font-family: var(--epiparam-font); font-size: 14px; padding: 10px 14px;",
+    htmltools::tags$div(style = "margin-bottom: 6px;",
+      htmltools::tags$b(res$model_name), " \u00b7 ", res$n_used, " observations",
+      if (!is.null(res$n_excluded) && res$n_excluded > 0)
+        paste0(" (", res$n_excluded, " set aside)") else "",
+      " \u00b7 priors: ", res$prior_text),
+    htmltools::tags$table(
+      style = "border-collapse: collapse; margin-bottom: 8px;",
+      htmltools::tags$tr(
+        htmltools::tags$th(style = "text-align:left; padding-right:18px; color:#666;", "Parameter"),
+        htmltools::tags$th(style = "text-align:left; padding-right:18px; color:#666;", "Rhat"),
+        htmltools::tags$th(style = "text-align:left; padding-right:18px; color:#666;", "n_eff")),
+      rows),
+    htmltools::tags$div(paste("Divergent transitions:",
+                              if (is.na(d$divergent)) "not reported" else d$divergent))
+  )
+}
+
+# ---------------------------------------------------------------------------
+# the prior controls on the two bayesian pages
+#
+# "Use EpiParam default priors" is the default, so that an inexperienced user
+# never has to think about priors. "Specify custom priors" opens the fields of
+# the distribution in use, and only of that one.
+# ---------------------------------------------------------------------------
+stan_prior_inputs <- function(prefix, model_input) {
+  field <- function(id, label, value)
+    numericInput(id, label, value = value, step = 0.1)
+  htmltools::tagList(
+    radioButtons(paste0(prefix, "_prior_mode"), "Prior specification",
+                 choices  = c("Use EpiParam default priors" = "default",
+                              "Specify custom priors"       = "custom"),
+                 selected = "default"),
+    lapply(names(STAN_PRIOR_DEFAULTS), function(d) {
+      lab <- STAN_PRIOR_LABELS[[d]]
+      def <- STAN_PRIOR_DEFAULTS[[d]]
+      two <- nzchar(lab$p2[3])   # gamma and weibull have two numbers on the second prior
+      conditionalPanel(
+        condition = sprintf("input.%s_prior_mode == 'custom' && input.%s == '%s'",
+                            prefix, model_input, d),
+        tags$div(style = "font-size: 13px; font-weight: 600; margin-top: 4px;", lab$p1[1]),
+        fluidRow(column(6, field(paste0(prefix, "_", d, "_p1a"), lab$p1[2], def$p1[1])),
+                 column(6, field(paste0(prefix, "_", d, "_p1b"), lab$p1[3], def$p1[2]))),
+        tags$div(style = "font-size: 13px; font-weight: 600; margin-top: 4px;", lab$p2[1]),
+        if (two)
+          fluidRow(column(6, field(paste0(prefix, "_", d, "_p2a"), lab$p2[2], def$p2[1])),
+                   column(6, field(paste0(prefix, "_", d, "_p2b"), lab$p2[3], def$p2[2])))
+        else
+          fluidRow(column(6, field(paste0(prefix, "_", d, "_p2b"), lab$p2[2], def$p2[2])))
+      )
+    })
+  )
+}
+
+# the priors a run should use: the defaults, or the numbers on the sidebar
+stan_prior_values <- function(input, prefix, dist) {
+  d    <- stan_dist_title(dist)
+  def  <- STAN_PRIOR_DEFAULTS[[d]]
+  mode <- input[[paste0(prefix, "_prior_mode")]]
+  if (is.null(mode) || !identical(mode, "custom")) return(NULL)   # NULL = the shipped model
+  num <- function(id, fallback) {
+    v <- input[[id]]
+    if (is.null(v) || length(v) != 1 || !is.finite(v)) fallback else as.numeric(v)
+  }
+  pri <- list(
+    p1 = c(num(paste0(prefix, "_", d, "_p1a"), def$p1[1]),
+           num(paste0(prefix, "_", d, "_p1b"), def$p1[2])),
+    p2 = c(num(paste0(prefix, "_", d, "_p2a"), def$p2[1]),
+           num(paste0(prefix, "_", d, "_p2b"), def$p2[2]))
+  )
+  validate(need(pri$p1[2] > 0 && pri$p2[2] > 0,
+                "the second number of each prior is a spread and has to be above zero."))
+  if (isTRUE(all.equal(pri, def))) NULL else pri
+}
 
 ```
 
@@ -1212,7 +1566,7 @@ fit_results_inc <- reactive({
   for(m in models) {
     # fit logic
     suppressWarnings({
-      fit <- fit_parametric_model(data, m, shift_val = 0)
+      fit <- fit_parametric_model(data, m)
     })
     if(!is.null(fit)) res[[m]] <- fit
   }
@@ -1611,6 +1965,9 @@ selectInput("bayes_model_select", "Distribution Model",
 sliderInput("iter_count_inc", "Iterations (Max 4000)", value = 1000, min = 500, max = 4000, step = 100)
 
 hr()
+stan_prior_inputs("inc", "bayes_model_select")
+
+hr()
 actionButton("run_bayes_inc", "Run Bayesian Model", icon = icon("play"), class = "btn-primary", width = "100%")
 
 hr()
@@ -1775,6 +2132,13 @@ bayes_inc_checked <- reactive({
   tB <- ifelse(is.na(tB), tE, tB)          # no start date: window has no width
   tE <- ifelse(tE > tS, tS, tE)            # exposure cannot end after onset
   
+  # the rows the chosen model can use: a distribution defined only for positive
+  # values cannot describe a case whose dates allow no positive delay. the
+  # model sets those rows aside, so the count here has to do the same or the
+  # page would report two different sample sizes.
+  usable <- incubation_usable(tB, tE, tS,
+                              positive = stan_dist_positive(input$bayes_model_select))
+  
   d$onset_read           <- d$date_symp
   d$exposure_from        <- d$date_min
   d$exposure_to          <- d$date_max
@@ -1784,6 +2148,8 @@ bayes_inc_checked <- reactive({
     is.na(d$date_symp)                    ~ "excluded: symptom onset date could not be read",
     is.na(d$date_min) & is.na(d$date_max) ~ "excluded: no exposure date given",
     tB > tE                               ~ "excluded: exposure window ends before it starts",
+    !usable                               ~ paste("excluded: these dates allow no positive incubation period, which the",
+                                                  tolower(input$bayes_model_select), "model needs"),
     TRUE                                  ~ "used"
   )
   d
@@ -1811,6 +2177,30 @@ bayes_inc_fit <- eventReactive(input$run_bayes_inc, {
     need(nrow(df) >= 5, "insufficient data: you need at least 5 observations to run this model.")
   )
 
+  model_dist <- input$bayes_model_select
+  pn         <- stan_pars(model_dist)
+  priors     <- stan_prior_values(input, "inc", model_dist)
+  
+  # a case whose dates make a positive incubation period impossible cannot be
+  # used by the lognormal, gamma or weibull distribution
+  keep  <- incubation_usable(df$tStartExposure, df$tEndExposure, df$tSymptomOnset,
+                             positive = stan_dist_positive(model_dist))
+  n_out <- sum(!keep)
+  df    <- df[keep, , drop = FALSE]
+  
+  validate(
+    need(nrow(df) >= 5,
+         sprintf("insufficient data: you need at least 5 cases this model can use (this selection has %d).",
+                 nrow(df)))
+  )
+  if (n_out > 0) {
+    showNotification(
+      sprintf("%d case%s set aside: their dates allow no positive incubation period.",
+              n_out, if (n_out == 1) " was" else "s were"),
+      type = "warning", duration = 5
+    )
+  }
+  
   stan_data <- list(
     N = nrow(df),
     tStartExposure = df$tStartExposure,
@@ -1820,7 +2210,7 @@ bayes_inc_fit <- eventReactive(input$run_bayes_inc, {
 
   withProgress(message = 'running bayesian model...', detail = 'initializing...', value = 0, {
 
-    mod <- get_compiled_stan_model(input$bayes_model_select)
+    mod <- stan_model_with_priors("incubation", model_dist, priors)
     incProgress(0.1, detail = "sampling chains...")
 
     fit <- rstan::sampling(
@@ -1832,7 +2222,10 @@ bayes_inc_fit <- eventReactive(input$run_bayes_inc, {
       iter = input$iter_count_inc,
       warmup = input$iter_count_inc / 2,
       refresh = 0,
-      pars = c("alphaInc", "sigmaInc"), # keep light!
+      pars = pn, # keep light!
+      # rstan opens a progress window unless it recognises the editor, which
+      # it does not under Positron, where the window becomes an error pop-up
+      open_progress = FALSE,
       control = list(adapt_delta = 0.95)
     )
 
@@ -1843,11 +2236,16 @@ bayes_inc_fit <- eventReactive(input$run_bayes_inc, {
     list(
       fit_obj = fit,
       iterations = input$iter_count_inc,
-      model_name = input$bayes_model_select,
-      alpha = params$alphaInc,
-      sigma = params$sigmaInc,
-      alpha_summary = quantile(params$alphaInc, probs = c(0.025, 0.5, 0.975)),
-      sigma_summary = quantile(params$sigmaInc, probs = c(0.025, 0.5, 0.975))
+      model_name = model_dist,
+      pars = pn,
+      n_used = nrow(df),
+      n_excluded = n_out,
+      prior_text = stan_prior_text(model_dist,
+                     if (is.null(priors)) STAN_PRIOR_DEFAULTS[[model_dist]] else priors),
+      alpha = params[[pn[1]]],
+      sigma = params[[pn[2]]],
+      alpha_summary = quantile(params[[pn[1]]], probs = c(0.025, 0.5, 0.975)),
+      sigma_summary = quantile(params[[pn[2]]], probs = c(0.025, 0.5, 0.975))
     )
   })
 })
@@ -1862,8 +2260,11 @@ bayes_inc_fit <- eventReactive(input$run_bayes_inc, {
 
 renderUI({
   req(bayes_inc_data())
-  
-  ss <- nrow(bayes_inc_data())
+  d  <- bayes_inc_data()
+  # the cases the chosen model can use, which is what it is fitted to
+  ss   <- sum(incubation_usable(d$tStartExposure, d$tEndExposure, d$tSymptomOnset,
+                                positive = stan_dist_positive(input$bayes_model_select)))
+  left <- nrow(d) - ss
   
   htmltools::div(
     style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
@@ -1873,7 +2274,7 @@ renderUI({
     ),
     htmltools::div(
       style = "font-size: 14px; text-align: center; color: #666;",
-      "Observations"
+      if (left > 0) sprintf("Observations (%d set aside)", left) else "Observations"
     )
   )
 })
@@ -2072,10 +2473,10 @@ renderPlotly({
   
   # base plot with grid lines but customized fonts and black axis
   p <- rstan::traceplot(bayes_inc_fit()$fit_obj, 
-                        pars = c("alphaInc", "sigmaInc"),
+                        pars = bayes_inc_fit()$pars,
                         linewidth = 0.25) + 
     theme_bw() + 
-    ggtitle("Trace Plot: Alpha & Sigma") +
+    ggtitle(paste("Trace Plot:", paste(bayes_inc_fit()$pars, collapse = " & "))) +
     theme(
       text = element_text(family = "Jost"),
       plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
@@ -2097,6 +2498,17 @@ renderPlotly({
       )
     ) %>%
     layout(font = list(family = "Jost"))
+})
+
+```
+
+### Convergence (Rhat, n_eff, divergences)
+
+```{r inc-bayes-diagnostics}
+
+renderUI({
+  req(bayes_inc_fit())
+  stan_diagnostics_output(bayes_inc_fit())
 })
 
 ```
@@ -2144,7 +2556,7 @@ valueBox(
 hr()
 
 valueBox(
-  value = tags$h6("Note: The Weibull, Gamma and Lognormal models are defined only for positive values, so they are fit on the serial intervals moved to the right by k days, and the estimates are moved back. k is taken from the data, so negative serial intervals are kept rather than dropped. The Normal model is fit on the raw values.",
+  value = tags$h6("Note: every model is fitted to the serial intervals as they are, with no shift. The Weibull, Gamma and Lognormal distributions are defined only for positive values, so if any serial interval in the data is zero or negative only the Normal model is fitted.",
                   style = "text-align: justify; font-family: var(--epiparam-font); font-size: 16px; color: white;"),
   color = "#FFFFFF")
 
@@ -2258,35 +2670,41 @@ fit_results_si <- reactive({
   data <- get_serial_data()
   if (is.null(data) || length(data) < 3) return(NULL)
   
-  models <- if(input$model_si == "ALL") c("normal", "weibull", "gamma", "lognormal") else tolower(input$model_si)
+  wanted <- if(input$model_si == "ALL") c("normal", "weibull", "gamma", "lognormal") else tolower(input$model_si)
+  
+  # the fitting uses the original serial intervals: no shift
+  data_for_fit <- data
+  
+  # which models are eligible. the lognormal, gamma and weibull distributions
+  # are defined only for positive values, so when the data contain a serial
+  # interval of zero or less only the normal model can be fitted.
+  has_nonpositive_si <- any(data <= 0, na.rm = TRUE)
+  if (has_nonpositive_si) {
+    models_to_fit <- c("normal")
+  } else {
+    models_to_fit <- c(
+      "normal",
+      "lognormal",
+      "gamma",
+      "weibull"
+    )
+  }
+  models <- intersect(wanted, models_to_fit)
   
   res <- list()
   for(m in models) {
-    # shift logic. weibull, gamma and lognormal are defined only for positive
-    # values, so the serial intervals are moved to the right before fitting and
-    # the fitted distribution is moved back afterwards, in fit_parametric_model.
-    # the shift is taken from the data, k = 1 - min(si), so a negative serial
-    # interval is kept instead of being dropped. with nothing negative k is 1,
-    # which is what the app did before.
-    shift_val <- if(m == "normal") 0 else max(1, 1 - min(data))
-    
-    # every value is positive after that shift; kept as a guard
-    if(m != "normal") {
-      valid_indices <- (data + shift_val) > 0
-      data_for_fit <- data[valid_indices]
-    } else {
-      data_for_fit <- data
-    }
-    
-    # check if we still have enough data after filtering
+    # check there is enough data
     if(length(data_for_fit) < 3) next
     
     suppressWarnings({
-      fit <- fit_parametric_model(data_for_fit, m, shift_val = shift_val)
+      fit <- fit_parametric_model(data_for_fit, m)
     })
     
     if(!is.null(fit)) res[[m]] <- fit
   }
+  attr(res, "n_total")       <- length(data)
+  attr(res, "n_nonpositive") <- sum(data <= 0, na.rm = TRUE)
+  attr(res, "withheld")      <- setdiff(wanted, names(res))
   res
 })
 
@@ -2339,6 +2757,13 @@ renderDT({
         )
       }))
       df <- df[order(df$AIC), ]
+      withheld <- attr(res, "withheld")
+      if (length(withheld)) {
+        df <- rbind(df, data.frame(
+          Model = sprintf("%s \u2014 not fitted: %d of %d serial intervals are zero or negative",
+                          toupper(withheld), attr(res, "n_nonpositive"), attr(res, "n_total")),
+          AIC = NA, BIC = NA))
+      }
     }
   }
   
@@ -2666,6 +3091,9 @@ selectInput("bayes_model_select_si", "Distribution Model",
 sliderInput("iter_count_si", "Iterations (Max 4000)", value = 1000, min = 500, max = 4000, step = 100)
 
 hr()
+stan_prior_inputs("si", "bayes_model_select_si")
+
+hr()
 actionButton("run_bayes_si", "Run Bayesian Model", icon = icon("play"), class = "btn-primary", width = "100%")
 
 hr()
@@ -2773,30 +3201,24 @@ bayes_si_data <- reactive({
                by = c("source_clean" = "id_clean"), 
                suffix = c("_infectee", "_infector"))
   
+  # both onset dates are reported as an interval and both are passed to the
+  # model as one. the infectee's onset used to be reduced to the midpoint of
+  # its interval and treated as exact, which is the asymmetry the reviewer
+  # asked about. nothing is shifted any more either: a pair the model cannot
+  # use is set aside, not moved.
+  origin <- as.Date("2019-12-31")
   df_final <- df_merged %>%
     filter(!is.na(onset_min_infectee), !is.na(onset_min_infector)) %>%
     mutate(
-      tStartExposure = as.integer(onset_min_infector - as.Date("2019-12-31")),
-      tEndExposure = as.integer(onset_max_infector - as.Date("2019-12-31")),
-      tSymptomOnset = as.integer(onset_min_infectee - as.Date("2019-12-31")) + 
-        as.integer(onset_max_infectee - onset_min_infectee)/2
-    ) 
-  
-  # weibull, gamma and lognormal need a positive serial interval. rather than
-  # dropping the pairs where the infectee fell ill before, or on the same day
-  # as, the infector, the onsets are moved to the right by k days and the
-  # fitted distribution is moved back when the results are shown. k covers the
-  # whole exposure window, so every draw of tE stays below the onset. when no
-  # pair needs it, k is 0 and nothing about the fit changes.
-  si_shift <- 0
-  if (input$bayes_model_select_si != "Normal" && nrow(df_final) > 0) {
-    need <- max(df_final$tEndExposure - df_final$tSymptomOnset)
-    if (need >= 0) {
-      si_shift <- need + 1
-      df_final$tSymptomOnset <- df_final$tSymptomOnset + si_shift
-    }
-  }
-  df_final$si_shift <- si_shift
+      infectorOnsetStart = as.integer(pmin(onset_min_infector, onset_max_infector, na.rm = TRUE) - origin),
+      infectorOnsetEnd   = as.integer(pmax(onset_min_infector, onset_max_infector, na.rm = TRUE) - origin),
+      infecteeOnsetStart = as.integer(pmin(onset_min_infectee, onset_max_infectee, na.rm = TRUE) - origin),
+      infecteeOnsetEnd   = as.integer(pmax(onset_min_infectee, onset_max_infectee, na.rm = TRUE) - origin)
+    ) %>%
+    mutate(
+      infectorOnsetEnd = ifelse(is.na(infectorOnsetEnd), infectorOnsetStart, infectorOnsetEnd),
+      infecteeOnsetEnd = ifelse(is.na(infecteeOnsetEnd), infecteeOnsetStart, infecteeOnsetEnd)
+    )
   
   n_final <- nrow(df_final)
   n_dropped <- n_before_cleaning - n_final
@@ -2836,12 +3258,25 @@ bayes_si_checked <- reactive({
   d$onset_read          <- d$onset_min
   d$source_onset_read   <- full$onset_min[i]
   d$serial_days         <- as.numeric(d$onset_min - full$onset_min[i])
+  # the pairs the chosen model can use, counted the same way the model counts
+  # them (see bayes_si_fit)
+  origin <- as.Date("2019-12-31")
+  usable <- serial_usable(
+    as.integer(pmin(full$onset_min[i], full$onset_max[i], na.rm = TRUE) - origin),
+    as.integer(pmax(full$onset_min[i], full$onset_max[i], na.rm = TRUE) - origin),
+    as.integer(pmin(d$onset_min, d$onset_max, na.rm = TRUE) - origin),
+    as.integer(pmax(d$onset_min, d$onset_max, na.rm = TRUE) - origin),
+    positive = stan_dist_positive(input$bayes_model_select_si))
+  usable[is.na(usable)] <- FALSE
+  
   known <- !is.na(d$source_clean) & nzchar(d$source_clean) & d$source_clean %in% full$id_clean
   d$status <- dplyr::case_when(
     is.na(d$onset_min)                             ~ "excluded: onset date could not be read",
     is.na(d$source_clean) | !nzchar(d$source_clean) ~ "excluded: no source of infection given",
     !known                                          ~ "excluded: the source of infection is not one of the case ids in this file",
     is.na(full$onset_min[i])                        ~ "excluded: the source case has no readable onset date",
+    !usable                                         ~ paste("excluded: these onset dates allow no positive serial interval, which the",
+                                                            tolower(input$bayes_model_select_si), "model needs"),
     TRUE                                            ~ "used"
   )
   d
@@ -2863,20 +3298,42 @@ bayes_si_fit <- eventReactive(input$run_bayes_si, {
   req(bayes_si_data())
   df <- bayes_si_data()
   
+  model_dist <- input$bayes_model_select_si
+  pn         <- stan_pars(model_dist)
+  priors     <- stan_prior_values(input, "si", model_dist)
+  
+  # a pair whose onset intervals make a positive serial interval impossible
+  # cannot be used by the lognormal, gamma or weibull distribution
+  keep  <- serial_usable(df$infectorOnsetStart, df$infectorOnsetEnd,
+                         df$infecteeOnsetStart, df$infecteeOnsetEnd,
+                         positive = stan_dist_positive(model_dist))
+  n_out <- sum(!keep)
+  df    <- df[keep, , drop = FALSE]
+  
   validate(
-    need(nrow(df) >= 5, "insufficient data: you need at least 5 linked pairs.")
+    need(nrow(df) >= 5,
+         sprintf("insufficient data: you need at least 5 linked pairs this model can use (this selection has %d).",
+                 nrow(df)))
   )
+  if (n_out > 0) {
+    showNotification(
+      sprintf("%d pair%s set aside: their onset dates allow no positive serial interval, which the %s model needs.",
+              n_out, if (n_out == 1) " was" else "s were", tolower(model_dist)),
+      type = "warning", duration = 6
+    )
+  }
   
   stan_data <- list(
     N = nrow(df),
-    tStartExposure = df$tStartExposure,
-    tEndExposure = df$tEndExposure,
-    tSymptomOnset = df$tSymptomOnset
+    infectorOnsetStart = df$infectorOnsetStart,
+    infectorOnsetEnd   = df$infectorOnsetEnd,
+    infecteeOnsetStart = df$infecteeOnsetStart,
+    infecteeOnsetEnd   = df$infecteeOnsetEnd
   )
   
   withProgress(message = 'running bayesian model...', detail = 'initializing...', value = 0, {
     
-    mod <- get_compiled_stan_model(input$bayes_model_select_si)
+    mod <- stan_model_with_priors("serial", model_dist, priors)
     incProgress(0.1, detail = "sampling chains...")
     
     # run the sampling
@@ -2890,7 +3347,10 @@ bayes_si_fit <- eventReactive(input$run_bayes_si, {
       warmup = input$iter_count_si / 2,
       refresh = 0,
       # optimization: only save specific parameters to save ram
-      pars = c("alphaInc", "sigmaInc"),
+      pars = pn,
+      # rstan opens a progress window unless it recognises the editor, which
+      # it does not under Positron, where the window becomes an error pop-up
+      open_progress = FALSE,
       control = list(adapt_delta = 0.95)
     )
     
@@ -2903,12 +3363,16 @@ bayes_si_fit <- eventReactive(input$run_bayes_si, {
     list(
       fit_obj = fit,
       iterations = input$iter_count_si,
-      model_name = input$bayes_model_select_si,
-      shift = if ("si_shift" %in% names(df)) df$si_shift[1] else 0,
-      alpha = params$alphaInc,
-      sigma = params$sigmaInc,
-      alpha_summary = quantile(params$alphaInc, probs = c(0.025, 0.5, 0.975)),
-      sigma_summary = quantile(params$sigmaInc, probs = c(0.025, 0.5, 0.975))
+      model_name = model_dist,
+      pars = pn,
+      n_used = nrow(df),
+      n_excluded = n_out,
+      prior_text = stan_prior_text(model_dist,
+                     if (is.null(priors)) STAN_PRIOR_DEFAULTS[[model_dist]] else priors),
+      alpha = params[[pn[1]]],
+      sigma = params[[pn[2]]],
+      alpha_summary = quantile(params[[pn[1]]], probs = c(0.025, 0.5, 0.975)),
+      sigma_summary = quantile(params[[pn[2]]], probs = c(0.025, 0.5, 0.975))
     )
   })
 })
@@ -2923,8 +3387,12 @@ bayes_si_fit <- eventReactive(input$run_bayes_si, {
 
 renderUI({
   req(bayes_si_data())
-  
-  ss <- nrow(bayes_si_data())
+  d  <- bayes_si_data()
+  # the pairs the chosen model can use
+  ss   <- sum(serial_usable(d$infectorOnsetStart, d$infectorOnsetEnd,
+                            d$infecteeOnsetStart, d$infecteeOnsetEnd,
+                            positive = stan_dist_positive(input$bayes_model_select_si)))
+  left <- nrow(d) - ss
   
   htmltools::div(
     style = "display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 10px;",
@@ -2934,7 +3402,7 @@ renderUI({
     ),
     htmltools::div(
       style = "font-size: 14px; text-align: center; color: #666;",
-      "Linked Pairs"
+      if (left > 0) sprintf("Linked Pairs (%d set aside)", left) else "Linked Pairs"
     )
   )
 })
@@ -2971,10 +3439,8 @@ renderDT({
     `Upper_95_CrI` = round(c(res$alpha_summary[3], res$sigma_summary[3]), 3)
   )
   
-  # the model was fitted to serial intervals moved to the right by res$shift,
-  # so the mean is moved back before it is shown
-  si_shift <- if (!is.null(res$shift)) res$shift else 0
-  mean_summ <- quantile(post_means - si_shift, probs = c(0.025, 0.5, 0.975))
+  # nothing is shifted any more, so nothing has to be moved back
+  mean_summ <- quantile(post_means, probs = c(0.025, 0.5, 0.975))
   
   df_mean <- data.frame(
     Parameter = "Mean Serial Interval",
@@ -2985,14 +3451,12 @@ renderDT({
   
   final_df <- rbind(df_stats, df_mean)
   
-  # make the shift visible: the two parameters above describe the shifted
-  # distribution, the mean has been moved back on to the observed scale
-  if (si_shift > 0) {
-    final_df <- rbind(final_df, data.frame(
-      Parameter = "Shift applied (days)",
-      Median = si_shift, Lower_95_CrI = NA, Upper_95_CrI = NA
-    ))
-  }
+  # the pairs the estimate rests on
+  final_df <- rbind(final_df, data.frame(
+    Parameter = if (!is.null(res$n_excluded) && res$n_excluded > 0)
+                  sprintf("Pairs used (%d set aside)", res$n_excluded) else "Pairs used",
+    Median = res$n_used, Lower_95_CrI = NA, Upper_95_CrI = NA
+  ))
   
   fname <- paste0("Serial_Interval_Bayesian_Stats_", Sys.Date())
   
@@ -3063,8 +3527,7 @@ renderHighchart({
   
   alpha_est <- median(res$alpha)
   sigma_est <- median(res$sigma)
-  si_shift  <- if (!is.null(res$shift)) res$shift else 0
-  
+
   # dynamic x-axis range logic
   if (res$model_name == "Normal") {
     # calculate lower bound to capture negative tail (99.9% coverage)
@@ -3074,10 +3537,9 @@ renderHighchart({
     x_vals <- seq(lower_bound, upper_bound, length.out = 300)
     x_min_limit <- NULL # let chart auto-scale to show negatives
   } else {
-    # strictly positive models are fitted on the shifted scale, so the density
-    # is calculated there and drawn back on the observed scale below
-    x_vals <- seq(0, 30 + si_shift, length.out = 300)
-    x_min_limit <- if (si_shift > 0) NULL else 0
+    # the fit is on the observed scale, so the curve is drawn there
+    x_vals <- seq(0, 30, length.out = 300)
+    x_min_limit <- 0
   }
   
   # dynamic density calculation
@@ -3118,7 +3580,7 @@ renderHighchart({
     ) %>%
     
     hc_add_series(
-      data = data.frame(x = x_vals - si_shift, y = y_vals), 
+      data = data.frame(x = x_vals, y = y_vals), 
       type = "area", 
       name = "Posterior Density", 
       color = "rgba(255, 140, 0, 0.5)",
@@ -3161,10 +3623,10 @@ renderPlotly({
   req(bayes_si_fit())
   
   p <- rstan::traceplot(bayes_si_fit()$fit_obj, 
-                        pars = c("alphaInc", "sigmaInc"),
+                        pars = bayes_si_fit()$pars,
                         linewidth = 0.25) +
     theme_bw() +
-    ggtitle("Trace Plot: Alpha & Sigma") + 
+    ggtitle(paste("Trace Plot:", paste(bayes_si_fit()$pars, collapse = " & "))) + 
     theme(
       text = element_text(family = "Jost"),
       plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
@@ -3190,6 +3652,17 @@ renderPlotly({
 
 ```
 
+
+### Convergence (Rhat, n_eff, divergences)
+
+```{r si-bayes-diagnostics}
+
+renderUI({
+  req(bayes_si_fit())
+  stan_diagnostics_output(bayes_si_fit())
+})
+
+```
 
 $R_t$ {data-orientation=rows}
 =========================================
@@ -3646,6 +4119,37 @@ dataset_kr <- eventReactive(input$file1_kr, {
   )
   # validation end
   
+  # ---- the case's own id --------------------------------------------------
+  # a file may carry it in a column of its own, which is what the fix assumes
+  # ("case_ids <- unique(dt$id)"). kappa_data.csv has no `id` column, but its
+  # `NO` column is the case number, and the id can also be read from the end of
+  # the transmission relationship ("#2 -> #4" is case #4). A column is used
+  # when it agrees with the relationship wherever both can be read; otherwise
+  # the relationship decides. Either way the two readings are compared and a
+  # disagreement is reported above the dataset preview instead of being
+  # resolved quietly.
+  norm_id <- function(x) {
+    x <- trimws(as.character(x))
+    x[!nzchar(x) | tolower(x) %in% c("na", "unknown", "null", "-")] <- NA_character_
+    sub("^#", "", x)                    # "#4" and "4" are the same case
+  }
+  parsed <- norm_id(case_id_of(dataset$transmission_relationship))
+  id_col <- intersect(c("id", "case_id", "no"), names(dataset))[1]
+  given  <- if (!is.na(id_col)) norm_id(dataset[[id_col]]) else rep(NA_character_, nrow(dataset))
+  both   <- !is.na(parsed) & !is.na(given)
+  agree  <- any(both) && all(parsed[both] == given[both])
+  
+  dataset$case_id_given  <- given
+  dataset$case_id_parsed <- parsed
+  dataset$case_id <- if (agree) ifelse(is.na(given), parsed, given) else parsed
+  dataset$case_id_source <- if (agree && !is.na(id_col))
+    sprintf("the %s column (it agrees with the transmission relationships)", toupper(id_col))
+  else if (!is.na(id_col))
+    sprintf("the transmission relationships (the %s column disagrees with them)", toupper(id_col))
+  else "the transmission relationships (this file has no id column)"
+  
+  dataset$source_id <- norm_id(dataset$source_of_infection_id)
+  
   dataset
 })
 
@@ -3669,16 +4173,48 @@ observeEvent(dataset_kr(), {
   updateSelectInput(session, "cluster_kr", choices = clusters, selected = "All")
 })
 
-# helper function for offspring distribution - uses filtered data
+# the case's own id, read from the transmission relationship
+case_id_of <- function(relationship) {
+  parts <- strsplit(as.character(relationship), "→|â†’|->", perl = TRUE)
+  out <- trimws(vapply(parts, function(p) if (length(p)) p[length(p)] else NA_character_,
+                       character(1)))
+  out[!nzchar(out) | tolower(out) == "unknown"] <- NA_character_
+  out
+}
+
+# the offspring distribution.
+#
+# the case population comes first, then the number of times each case is named
+# as the source of another case; a case that is never named has no offspring,
+# and that is where the zeros come from. counting rows minus distinct sources,
+# as the app did before, counted sources that belong to other clusters and
+# missed the cases of this cluster that infected nobody.
+#
+# THE DEFINITION, for a selected cluster: the population is the cases of that
+# cluster, and a transmission counts when the case it infected is also in the
+# cluster. Infections of cases outside the cluster are not counted, so what is
+# estimated is how the cluster spread within itself. For "All" every case and
+# every transmission in the file is counted.
 get_offspring_data <- function() {
   req(filtered_dataset_kr())
   dt <- filtered_dataset_kr()
   if (nrow(dt) == 0) stop("no data available for selected cluster")
-  freqt <- table(dt$source_of_infection_id) %>% data.frame() %>% filter(Var1 != 'unknown')
-  zeros <- nrow(dt) - nrow(freqt)
-  offt <- table(freqt$Freq) %>% data.frame()
-  offtk <- c(rep(0, zeros), rep(as.numeric(levels(offt$Var1)), offt$Freq))
-  list(offtk = offtk, fit = fitdistr(offtk, "negative binomial"))
+  
+  case_ids <- unique(dt$case_id)
+  case_ids <- case_ids[!is.na(case_ids)]
+  if (!length(case_ids)) stop("no case ids could be read for this selection")
+  
+  offtk <- sapply(
+    case_ids,
+    function(x) sum(dt$source_id == x, na.rm = TRUE)
+  )
+  
+  fit <- tryCatch(suppressWarnings(fitdistr(offtk, "negative binomial")),
+                  error = function(e) NULL)
+  list(offtk = offtk, fit = fit,
+       n_cases = length(offtk), n_links = sum(offtk),
+       scope = if (identical(input$cluster_kr, "All")) "every transmission in the file"
+               else "transmissions inside this cluster only")
 }
 
 ```
@@ -3693,8 +4229,10 @@ renderUI({
   # ensure filtered dataset is available
   req(filtered_dataset_kr())
   
-  # data Preparation
-  ss <- nrow(filtered_dataset_kr())
+  # the cases whose offspring are being counted, which is what the model is
+  # fitted to (it used to be the number of rows of the file)
+  res <- tryCatch(get_offspring_data(), error = function(e) NULL)
+  ss  <- if (is.null(res)) nrow(filtered_dataset_kr()) else res$n_cases
   
   # render the sample size text
   htmltools::div(
@@ -3741,9 +4279,14 @@ renderDT({
       mutate(
         parameter = gsub("size", "Kappa", parameter),
         parameter = gsub("mu", "Rₑ", parameter),
-        value = round(value, 3)
+        value = as.character(round(value, 3))
       ) %>%
       head(4)
+    
+    # the definition behind the numbers, printed with them
+    fit_df <- rbind(fit_df, data.frame(
+      parameter = "Offspring counted",
+      value = res$scope, stringsAsFactors = FALSE))
     
     df <- fit_df
   }
@@ -3847,7 +4390,7 @@ renderHighchart({
     NULL
   })
   
-  if (is.null(res)) {
+  if (is.null(res) || is.null(res$fit)) {
     # create empty chart with message
     highchart() %>%
       hc_title(
@@ -4321,6 +4864,23 @@ renderUI({
     grepl("->|=>|>|,|;|/|\\bto\\b", rel, ignore.case = TRUE)
   
   problems <- list()
+  # how the case ids were read, and whether the two readings disagree anywhere
+  g <- d$case_id_given; pz <- d$case_id_parsed
+  both_read <- !is.na(g) & !is.na(pz)
+  if (any(both_read & g != pz)) {
+    bad <- which(both_read & g != pz)
+    problems <- c(problems, list(sprintf(
+      paste("%d row%s give a different case id in the id column and in the transmission",
+            "relationship (for example %s); the relationship was used."),
+      length(bad), if (length(bad) == 1) "" else "s",
+      paste(sprintf("\u201c%s\u201d vs \u201c%s\u201d", g[utils::head(bad, 2)], pz[utils::head(bad, 2)]),
+            collapse = ", "))))
+  }
+  if (any(is.na(d$case_id))) {
+    problems <- c(problems, list(sprintf(
+      "%d row%s have no readable case id, so they are not counted as cases.",
+      sum(is.na(d$case_id)), if (sum(is.na(d$case_id)) == 1) "" else "s")))
+  }
   if (any(other_sep)) {
     problems <- c(problems, list(sprintf(
       paste("%d row%s give a transmission relationship the app could not read: chains must be",
@@ -4333,12 +4893,18 @@ renderUI({
       "%d row%s have no transmission relationship, and contribute no link.",
       sum(blank), if (sum(blank) == 1) "" else "s")))
   }
-  data_check_panel(
-    n_read = nrow(d),
-    n_used = sum(n_links > 0),
-    problems = problems,
-    used_label = "with an onward transmission link",
-    out_label  = "index cases with none"
+  htmltools::tagList(
+    data_check_panel(
+      n_read = nrow(d),
+      n_used = sum(n_links > 0),
+      problems = problems,
+      used_label = "with an onward transmission link",
+      out_label  = "index cases with none"
+    ),
+    htmltools::div(
+      style = "margin:-6px 0 12px 0;font-size:13px;color:#555555;",
+      paste0("Case identifiers were read from ", d$case_id_source[1], ".")
+    )
   )
 })
 ```
@@ -4350,7 +4916,9 @@ renderDataTable({
   d$links_read <- vapply(as.character(d$transmission_relationship),
                          function(r) nrow(parse_transmission_chain(r)),
                          integer(1), USE.NAMES = FALSE)
-  dplyr::relocate(d, links_read, transmission_relationship)
+  # the identifiers the app read out of the relationship, next to the text they
+  # were read from, so the parsing can be checked at a glance
+  dplyr::relocate(d, links_read, transmission_relationship, case_id, source_id)
 }, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE, fillContainer = FALSE)
 
 ```
